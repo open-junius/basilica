@@ -6,6 +6,7 @@
 use super::miner_client::{MinerClient, MinerClientConfig};
 use super::types::{ExecutorInfo, ExecutorStatus, MinerInfo};
 use crate::config::VerificationConfig;
+use crate::persistence::{entities::VerificationLog, SimplePersistence};
 use crate::ssh::{ExecutorSshDetails, ValidatorSshClient, ValidatorSshKeyManager};
 use anyhow::{Context, Result};
 use common::identity::{ExecutorId, Hotkey, MinerUid};
@@ -13,6 +14,7 @@ use common::ssh::SshConnectionDetails;
 use protocol::miner_discovery::{
     CloseSshSessionRequest, InitiateSshSessionRequest, SshSessionStatus,
 };
+use sqlx::Row;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -28,6 +30,8 @@ pub struct VerificationEngine {
     miner_client_config: MinerClientConfig,
     validator_hotkey: Hotkey,
     ssh_client: Arc<ValidatorSshClient>,
+    /// Database persistence for storing verification results
+    persistence: Arc<SimplePersistence>,
     /// Whether to use dynamic discovery or fall back to static config
     use_dynamic_discovery: bool,
     /// SSH key path for executor access (fallback)
@@ -43,7 +47,17 @@ pub struct VerificationEngine {
 }
 
 impl VerificationEngine {
-    pub fn new(config: VerificationConfig) -> Self {
+    pub fn new(_config: VerificationConfig) -> Self {
+        warn!("Creating VerificationEngine without persistence - database storage will not be available");
+        panic!(
+            "VerificationEngine requires database persistence - use new_with_persistence() instead"
+        )
+    }
+
+    pub fn new_with_persistence(
+        config: VerificationConfig,
+        persistence: Arc<SimplePersistence>,
+    ) -> Self {
         warn!("Creating VerificationEngine without validator hotkey - dynamic discovery will not be available");
         Self {
             config: config.clone(),
@@ -57,6 +71,7 @@ impl VerificationEngine {
             )
             .unwrap(),
             ssh_client: Arc::new(ValidatorSshClient::new()),
+            persistence,
             use_dynamic_discovery: false, // Disabled without proper initialization
             ssh_key_path: None,
             miner_endpoints: Arc::new(RwLock::new(HashMap::new())),
@@ -348,9 +363,11 @@ impl VerificationEngine {
                 / executor_results.len() as f64
         };
 
-        // Step 4: Store verification result
-        self.store_verification_result(task.miner_uid, overall_score)
-            .await?;
+        // Step 4: Store individual executor verification results
+        for result in &executor_results {
+            self.store_executor_verification_result(task.miner_uid, result)
+                .await?;
+        }
 
         verification_steps.push(VerificationStep {
             step_name: "result_storage".to_string(),
@@ -589,37 +606,146 @@ impl VerificationEngine {
             .await
     }
 
-    async fn store_verification_result(&self, miner_uid: u16, score: f64) -> Result<()> {
+    async fn store_executor_verification_result(
+        &self,
+        miner_uid: u16,
+        executor_result: &ExecutorVerificationResult,
+    ) -> Result<()> {
         info!(
-            "Storing verification result for miner {}: score={:.2}",
-            miner_uid, score
+            "Storing executor verification result to database for miner {}, executor {}: score={:.2}",
+            miner_uid, executor_result.executor_id, executor_result.verification_score
         );
 
-        // Store verification result with timestamp and miner info
-        let verification_entry = serde_json::json!({
-            "miner_uid": miner_uid,
-            "score": score,
-            "timestamp": chrono::Utc::now().to_rfc3339(),
-            "verification_method": "dynamic_discovery"
-        });
+        // Create verification log entry for database storage
+        let verification_log = VerificationLog::new(
+            executor_result.executor_id.clone(),
+            self.validator_hotkey.to_string(),
+            "ssh_automation".to_string(),
+            executor_result.verification_score,
+            executor_result.ssh_connection_successful
+                && executor_result.binary_validation_successful,
+            serde_json::json!({
+                "miner_uid": miner_uid,
+                "executor_id": executor_result.executor_id,
+                "ssh_connection_successful": executor_result.ssh_connection_successful,
+                "binary_validation_successful": executor_result.binary_validation_successful,
+                "verification_method": "ssh_automation",
+                "executor_result": executor_result.executor_result,
+                "score_details": {
+                    "verification_score": executor_result.verification_score,
+                    "ssh_score": if executor_result.ssh_connection_successful { 0.5 } else { 0.0 },
+                    "binary_score": if executor_result.binary_validation_successful { 0.5 } else { 0.0 }
+                }
+            }),
+            2000, // duration_ms placeholder for executor verification
+            if !executor_result.ssh_connection_successful {
+                Some("SSH connection failed".to_string())
+            } else if !executor_result.binary_validation_successful {
+                Some("Binary validation failed".to_string())
+            } else {
+                None
+            },
+        );
 
-        // Write to verification results file for persistence
-        let results_file = "/tmp/basilica_verification_results.json";
-        let mut results = if let Ok(content) = tokio::fs::read_to_string(results_file).await {
-            serde_json::from_str::<Vec<serde_json::Value>>(&content).unwrap_or_default()
+        // Store directly to database to avoid repository trait issues
+        let query = r#"
+            INSERT INTO verification_logs (
+                id, executor_id, validator_hotkey, verification_type, timestamp,
+                score, success, details, duration_ms, error_message, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        "#;
+
+        if let Err(e) = sqlx::query(query)
+            .bind(verification_log.id.to_string())
+            .bind(&verification_log.executor_id)
+            .bind(&verification_log.validator_hotkey)
+            .bind(&verification_log.verification_type)
+            .bind(verification_log.timestamp.to_rfc3339())
+            .bind(verification_log.score)
+            .bind(if verification_log.success { 1 } else { 0 })
+            .bind(serde_json::to_string(&verification_log.details).unwrap_or_default())
+            .bind(verification_log.duration_ms)
+            .bind(&verification_log.error_message)
+            .bind(verification_log.created_at.to_rfc3339())
+            .bind(verification_log.updated_at.to_rfc3339())
+            .execute(self.persistence.pool())
+            .await
+        {
+            error!(
+                "Failed to store executor verification result to database: {}",
+                e
+            );
+            return Err(anyhow::anyhow!("Database storage failed: {}", e));
+        }
+
+        // Ensure miner-executor relationship exists
+        if let Err(e) = self
+            .ensure_miner_executor_relationship(miner_uid, &executor_result.executor_id)
+            .await
+        {
+            warn!("Failed to ensure miner-executor relationship: {}", e);
+            // Don't fail the verification storage for this
+        }
+
+        info!(
+            "Executor verification result successfully stored to database for miner {}, executor {}: score={:.2}",
+            miner_uid, executor_result.executor_id, executor_result.verification_score
+        );
+
+        Ok(())
+    }
+
+    /// Ensure miner-executor relationship exists in database for weight calculation
+    async fn ensure_miner_executor_relationship(
+        &self,
+        miner_uid: u16,
+        executor_id: &str,
+    ) -> Result<()> {
+        info!(
+            "Ensuring miner-executor relationship for miner {} and executor {}",
+            miner_uid, executor_id
+        );
+
+        let miner_id = format!("miner_{}", miner_uid);
+
+        // Check if relationship already exists
+        let query =
+            "SELECT COUNT(*) as count FROM miner_executors WHERE miner_id = ? AND executor_id = ?";
+        let row = sqlx::query(query)
+            .bind(&miner_id)
+            .bind(executor_id)
+            .fetch_one(self.persistence.pool())
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to check miner-executor relationship: {}", e))?;
+
+        let count: i64 = row.get("count");
+
+        if count == 0 {
+            // Insert new relationship
+            let insert_query = r#"
+                INSERT OR IGNORE INTO miner_executors (miner_id, executor_id, created_at, updated_at)
+                VALUES (?, ?, datetime('now'), datetime('now'))
+            "#;
+
+            sqlx::query(insert_query)
+                .bind(&miner_id)
+                .bind(executor_id)
+                .execute(self.persistence.pool())
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!("Failed to insert miner-executor relationship: {}", e)
+                })?;
+
+            info!(
+                "Created miner-executor relationship: {} -> {}",
+                miner_id, executor_id
+            );
         } else {
-            Vec::new()
-        };
-
-        results.push(verification_entry);
-
-        let results_json = serde_json::to_string_pretty(&results)?;
-        tokio::fs::write(results_file, results_json).await?;
-
-        info!(
-            "Verification result stored for miner {}: score={:.2}",
-            miner_uid, score
-        );
+            debug!(
+                "Miner-executor relationship already exists: {} -> {}",
+                miner_id, executor_id
+            );
+        }
 
         Ok(())
     }
@@ -746,6 +872,7 @@ impl VerificationEngine {
         validator_hotkey: Hotkey,
         ssh_client: Arc<ValidatorSshClient>,
         ssh_key_path: Option<PathBuf>,
+        persistence: Arc<SimplePersistence>,
     ) -> Self {
         let miner_client_config = MinerClientConfig {
             timeout: config.discovery_timeout,
@@ -759,6 +886,7 @@ impl VerificationEngine {
             miner_client_config,
             validator_hotkey,
             ssh_client,
+            persistence,
             use_dynamic_discovery: config.use_dynamic_discovery,
             ssh_key_path,
             miner_endpoints: Arc::new(RwLock::new(HashMap::new())),
@@ -774,6 +902,7 @@ impl VerificationEngine {
         validator_hotkey: Hotkey,
         ssh_client: Arc<ValidatorSshClient>,
         ssh_key_manager: Arc<ValidatorSshKeyManager>,
+        persistence: Arc<SimplePersistence>,
     ) -> Result<Self> {
         let miner_client_config = MinerClientConfig {
             timeout: config.discovery_timeout,
@@ -787,6 +916,7 @@ impl VerificationEngine {
             miner_client_config,
             validator_hotkey,
             ssh_client,
+            persistence,
             use_dynamic_discovery: config.use_dynamic_discovery,
             ssh_key_path: None,
             miner_endpoints: Arc::new(RwLock::new(HashMap::new())),
@@ -802,6 +932,7 @@ impl VerificationEngine {
         bittensor_service: Arc<bittensor::Service>,
         ssh_client: Arc<ValidatorSshClient>,
         ssh_key_path: Option<PathBuf>,
+        persistence: Arc<SimplePersistence>,
     ) -> anyhow::Result<Self> {
         let validator_hotkey = bittensor::account_id_to_hotkey(bittensor_service.get_account_id())
             .map_err(|e| anyhow::anyhow!("Failed to convert account ID to hotkey: {}", e))?;
@@ -821,6 +952,7 @@ impl VerificationEngine {
             miner_client_config,
             validator_hotkey,
             ssh_client,
+            persistence,
             use_dynamic_discovery: config.use_dynamic_discovery,
             ssh_key_path,
             miner_endpoints: Arc::new(RwLock::new(HashMap::new())),
@@ -1305,6 +1437,7 @@ impl VerificationEngine {
         miner_client_config: MinerClientConfig,
         validator_hotkey: Hotkey,
         ssh_client: Arc<ValidatorSshClient>,
+        persistence: Arc<SimplePersistence>,
         use_dynamic_discovery: bool,
         ssh_key_manager: Option<Arc<ValidatorSshKeyManager>>,
         bittensor_service: Option<Arc<bittensor::Service>>,
@@ -1321,6 +1454,7 @@ impl VerificationEngine {
             miner_client_config,
             validator_hotkey,
             ssh_client,
+            persistence,
             use_dynamic_discovery,
             ssh_key_path: None, // Not used when SSH key manager is available
             miner_endpoints: Arc::new(RwLock::new(HashMap::new())),

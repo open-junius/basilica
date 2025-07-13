@@ -4,9 +4,7 @@ use anyhow::Result;
 use common::config::ConfigValidation;
 
 pub mod database;
-pub mod scores;
 pub mod service;
-pub mod weights;
 
 pub struct CommandHandler;
 
@@ -41,8 +39,6 @@ impl CommandHandler {
                 Err(anyhow::anyhow!("Legacy validation commands have been removed. Use the verification engine API instead."))
             }
 
-            Command::Weights { action } => weights::handle_weights(action).await,
-            Command::Scores { action } => scores::handle_scores(action).await,
             Command::Database { action } => database::handle_database(action).await,
         }
     }
