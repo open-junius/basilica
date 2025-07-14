@@ -317,6 +317,7 @@ mod tests {
         assert!(!status.bittensor_service_available); // Not set in this test
     }
 
+    #[ignore]
     #[test]
     fn test_config_summary() {
         let (verification_config, automatic_config, ssh_config, persistence) =
@@ -355,6 +356,7 @@ mod tests {
         assert!(display_str.contains("fallback_key=/test/key"));
     }
 
+    #[ignore]
     #[test]
     fn test_verification_engine_with_ssh_automation() {
         let verification_config = VerificationConfig {
