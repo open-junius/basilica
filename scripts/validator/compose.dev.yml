@@ -27,7 +27,7 @@ services:
     networks:
       - basilica_network_dev
 
-    command: ["--config", "/app/validator.toml"]
+    command: ["start", "--config", "/app/validator.toml"]
 
 networks:
   basilica_network_dev:

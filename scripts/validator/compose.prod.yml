@@ -1,6 +1,6 @@
 services:
   validator:
-    image: ghcr.io/tplr-ai/basilica-validator:latest
+    image: ghcr.io/tplr-ai/basilica/validator:latest
     container_name: basilica-validator
     restart: unless-stopped
     labels:
@@ -29,7 +29,7 @@ services:
     networks:
       - basilica_network
 
-    command: ["--config", "/app/validator.toml"]
+    command: ["start", "--config", "/app/validator.toml"]
 
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
