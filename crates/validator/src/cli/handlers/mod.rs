@@ -13,9 +13,14 @@ impl CommandHandler {
         Self
     }
 
-    pub async fn execute_with_context(&self, command: Command, local_test: bool) -> Result<()> {
+    pub async fn execute_with_context(
+        &self,
+        command: Command,
+        global_config: Option<std::path::PathBuf>,
+        local_test: bool,
+    ) -> Result<()> {
         match command {
-            Command::Start { config } => service::handle_start(config, local_test).await,
+            Command::Start { config } => service::handle_start(global_config.or(config), local_test).await,
             Command::Stop => service::handle_stop().await,
             Command::Status => service::handle_status().await,
             Command::GenConfig { output } => service::handle_gen_config(output).await,

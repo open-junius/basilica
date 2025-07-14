@@ -187,7 +187,7 @@ deploy_binary() {
     # Deploy veritas binaries if specified
     deploy_veritas_binaries
 
-    local start_cmd="cd /opt/basilica && RUST_LOG=debug nohup ./validator start --config config/validator.toml > validator.log 2>&1 &"
+    local start_cmd="cd /opt/basilica && RUST_LOG=debug nohup ./validator --config config/validator.toml start > validator.log 2>&1 &"
 
     log "Starting validator"
     timeout 15 ssh -o ConnectTimeout=5 "$SERVER_USER@$SERVER_HOST" -p "$SERVER_PORT" "$start_cmd" || true
@@ -251,7 +251,7 @@ deploy_docker() {
     log "Deploying validator in docker mode"
 
     log "Stopping existing validator containers"
-    ssh_cmd "cd /opt/basilica && docker-compose -f compose.prod.yml down 2>/dev/null || true"
+    ssh_cmd "cd /opt/basilica && docker compose -f compose.prod.yml down 2>/dev/null || true"
 
     log "Creating directories for validator"
     ssh_cmd "mkdir -p /opt/basilica/config"
@@ -273,15 +273,15 @@ deploy_docker() {
     fi
 
     log "Pulling and starting validator container"
-    ssh_cmd "cd /opt/basilica && docker-compose -f compose.prod.yml pull"
-    ssh_cmd "cd /opt/basilica && docker-compose -f compose.prod.yml up -d"
+    ssh_cmd "cd /opt/basilica && docker compose -f compose.prod.yml pull"
+    ssh_cmd "cd /opt/basilica && docker compose -f compose.prod.yml up -d"
 
     sleep 5
-    if ssh_cmd "cd /opt/basilica && docker-compose -f compose.prod.yml ps | grep -q 'Up'"; then
+    if ssh_cmd "cd /opt/basilica && docker compose -f compose.prod.yml ps | grep -q 'Up'"; then
         log "Validator container started successfully"
     else
         log "ERROR: Validator container failed to start"
-        ssh_cmd "cd /opt/basilica && docker-compose -f compose.prod.yml logs --tail=20"
+        ssh_cmd "cd /opt/basilica && docker compose -f compose.prod.yml logs --tail=20"
         exit 1
     fi
 }
@@ -323,7 +323,7 @@ health_check_service() {
             fi
             ;;
         docker)
-            if ssh_cmd "cd /opt/basilica && docker-compose -f compose.prod.yml ps | grep -q 'Up'"; then
+            if ssh_cmd "cd /opt/basilica && docker compose -f compose.prod.yml ps | grep -q 'Up'"; then
                 log "Validator container running"
             else
                 log "Validator container not running"
@@ -342,7 +342,7 @@ follow_logs_service() {
             ssh_cmd "journalctl -u basilica-validator -f"
             ;;
         docker)
-            ssh_cmd "cd /opt/basilica && docker-compose -f compose.prod.yml logs -f"
+            ssh_cmd "cd /opt/basilica && docker compose -f compose.prod.yml logs -f"
             ;;
     esac
 }
