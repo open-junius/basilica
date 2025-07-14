@@ -64,7 +64,7 @@ RUN if [ -n "$BITTENSOR_NETWORK" ] && [ -z "$METADATA_CHAIN_ENDPOINT" ]; then \
     find /tmp/target -name "*.rlib" -delete 2>/dev/null || true
 
 # Runtime image
-FROM nvidia/cuda:12.8.0-runtime-ubuntu22.04
+FROM nvidia/cuda:12.8.0-runtime-ubuntu24.04
 
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y \
