@@ -13,10 +13,6 @@ impl CommandHandler {
         Self
     }
 
-    pub async fn execute(&self, command: Command) -> Result<()> {
-        self.execute_with_context(command, false).await
-    }
-
     pub async fn execute_with_context(&self, command: Command, local_test: bool) -> Result<()> {
         match command {
             Command::Start { config } => service::handle_start(config, local_test).await,
@@ -75,27 +71,6 @@ impl HandlerUtils {
         }
 
         Ok(())
-    }
-
-    pub fn format_json<T: serde::Serialize>(data: &T) -> Result<String> {
-        Ok(serde_json::to_string_pretty(data)?)
-    }
-
-    pub fn format_table<T: std::fmt::Display>(headers: &[&str], rows: &[Vec<T>]) -> String {
-        let mut output = String::new();
-
-        output.push_str(&format!("{:<20}", headers.join(" | ")));
-        output.push('\n');
-        output.push_str(&"-".repeat(headers.len() * 20));
-        output.push('\n');
-
-        for row in rows {
-            let row_str: Vec<String> = row.iter().map(|cell| format!("{cell:<20}")).collect();
-            output.push_str(&row_str.join(" | "));
-            output.push('\n');
-        }
-
-        output
     }
 
     pub fn print_success(message: &str) {

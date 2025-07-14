@@ -595,17 +595,6 @@ impl VerificationEngine {
         }
     }
 
-    /// Verify executor with SSH automation (enhanced with binary validation)
-    async fn verify_executor_with_ssh_automation(
-        &self,
-        miner_endpoint: &str,
-        executor_info: &ExecutorInfoDetailed,
-    ) -> Result<ExecutorVerificationResult> {
-        // Direct call to enhanced method
-        self.verify_executor_with_ssh_automation_enhanced(miner_endpoint, executor_info)
-            .await
-    }
-
     async fn store_executor_verification_result(
         &self,
         miner_uid: u16,
@@ -706,7 +695,7 @@ impl VerificationEngine {
             miner_uid, executor_id
         );
 
-        let miner_id = format!("miner_{}", miner_uid);
+        let miner_id = format!("miner_{miner_uid}");
 
         // Check if relationship already exists
         let query =
@@ -806,64 +795,6 @@ impl VerificationEngine {
         );
 
         Ok(final_score)
-    }
-
-    /// Verify executors with enhanced automation
-    async fn verify_executors_with_automation(&self, executors: &[ExecutorInfo]) -> Vec<f64> {
-        let mut scores = Vec::new();
-
-        for executor in executors {
-            match self
-                .verify_executor_with_enhanced_automation(executor)
-                .await
-            {
-                Ok(score) => {
-                    scores.push(score);
-                    info!("Enhanced automation verification completed for executor {} with score: {:.4}",
-                          executor.id, score);
-                }
-                Err(e) => {
-                    scores.push(0.0);
-                    warn!(
-                        "Enhanced automation verification failed for executor {}: {}",
-                        executor.id, e
-                    );
-                }
-            }
-        }
-
-        scores
-    }
-
-    /// Verify executor with enhanced automation including rate limiting and retry logic
-    async fn verify_executor_with_enhanced_automation(
-        &self,
-        executor: &ExecutorInfo,
-    ) -> Result<f64> {
-        let max_retries = 3;
-        let mut retry_count = 0;
-
-        loop {
-            match self.verify_executor_dynamic(executor).await {
-                Ok(score) => return Ok(score),
-                Err(e) if retry_count < max_retries - 1 => {
-                    retry_count += 1;
-                    let delay = Duration::from_millis(1000 * retry_count as u64);
-                    warn!(
-                        "Verification attempt {} failed for executor {}: {}. Retrying in {:?}",
-                        retry_count, executor.id, e, delay
-                    );
-                    tokio::time::sleep(delay).await;
-                }
-                Err(e) => {
-                    error!(
-                        "All verification attempts failed for executor {}: {}",
-                        executor.id, e
-                    );
-                    return Err(e);
-                }
-            }
-        }
     }
 
     /// Create with full configuration for dynamic discovery
