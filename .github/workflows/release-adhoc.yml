@@ -18,14 +18,31 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      services: ${{ steps.parse.outputs.services }}
+    steps:
+      - name: Parse services input
+        id: parse
+        run: |
+          if [ "${{ github.event.inputs.services }}" = "all" ]; then
+            echo 'services=["executor", "miner", "validator", "public-api"]' >> $GITHUB_OUTPUT
+          else
+            # Convert comma-separated to JSON array
+            services=$(echo "${{ github.event.inputs.services }}" | sed 's/,/", "/g' | sed 's/^/["/' | sed 's/$/"]/')
+            echo "services=$services" >> $GITHUB_OUTPUT
+          fi
+
   build-docker-images:
+    needs: prepare
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
     strategy:
       matrix:
-        service: ${{ fromJson(github.event.inputs.services == 'all' && '["executor", "miner", "validator", "public-api"]' || format('["{0}"]', join(split(github.event.inputs.services, ','), '","'))) }}
+        service: ${{ fromJson(needs.prepare.outputs.services) }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
