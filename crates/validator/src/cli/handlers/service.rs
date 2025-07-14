@@ -305,6 +305,7 @@ async fn start_validator_services(
             config.automatic_verification.clone(),
             config.ssh_session.clone(),
             bittensor_service.clone(),
+            persistence_arc.clone(),
         )?);
 
         // Initialize weight setter with block-based timing from emission config

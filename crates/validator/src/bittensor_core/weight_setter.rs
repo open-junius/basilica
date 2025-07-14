@@ -6,7 +6,7 @@
 use crate::bittensor_core::weight_allocation::WeightAllocationEngine;
 use crate::config::emission::EmissionConfig;
 use crate::gpu::categorization;
-use crate::gpu::{CategoryStats, GpuScoringEngine};
+use crate::gpu::GpuScoringEngine;
 use crate::persistence::entities::VerificationLog;
 use crate::persistence::SimplePersistence;
 use anyhow::Result;
@@ -15,7 +15,6 @@ use common::config::BittensorConfig;
 use common::identity::{ExecutorId, MinerUid};
 use common::{KeyValueStorage, MemoryStorage};
 use sqlx::Row;
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::interval;
@@ -49,7 +48,7 @@ pub struct WeightSetter {
     last_weight_set_block: Arc<tokio::sync::Mutex<u64>>,
     gpu_scoring_engine: Arc<GpuScoringEngine>,
     weight_allocation_engine: Arc<WeightAllocationEngine>,
-    emission_config: EmissionConfig,
+    _emission_config: EmissionConfig,
 }
 
 impl WeightSetter {
@@ -80,16 +79,8 @@ impl WeightSetter {
             last_weight_set_block: Arc::new(tokio::sync::Mutex::new(0)),
             gpu_scoring_engine,
             weight_allocation_engine,
-            emission_config,
+            _emission_config: emission_config,
         })
-    }
-
-    /// Get the validator's hotkey as a string
-    pub fn get_validator_hotkey(&self) -> Result<String> {
-        let account_id = self.bittensor_service.get_account_id();
-        let hotkey = bittensor::account_id_to_hotkey(account_id)
-            .map_err(|e| anyhow::anyhow!("Failed to convert account_id to hotkey: {}", e))?;
-        Ok(hotkey.to_string())
     }
 
     /// Start the weight setting loop
@@ -251,51 +242,6 @@ impl WeightSetter {
         Ok(())
     }
 
-    /// Get category statistics for monitoring
-    pub async fn get_category_statistics(&self) -> Result<HashMap<String, CategoryStats>> {
-        self.gpu_scoring_engine.get_category_statistics().await
-    }
-
-    /// Normalize weights for chain submission using the provided normalization function
-    fn normalize_weights_for_chain(
-        &self,
-        weights: Vec<(u16, f64)>,
-    ) -> Result<Vec<NormalizedWeight>> {
-        // Convert scores to u16 for normalization (scale to 0-65535 range)
-        let max_score = weights
-            .iter()
-            .map(|(_, score)| *score)
-            .fold(0.0f64, f64::max);
-
-        if max_score <= 0.0 {
-            error!("No positive scores found for normalization");
-            return Err(anyhow::anyhow!("No positive scores found"));
-        }
-
-        // Normalize scores directly to u16 range
-        // The chain expects weights in the 0-65535 range
-        // We don't need to call normalize_weights again since we're already normalizing here
-        let result: Vec<NormalizedWeight> = weights
-            .iter()
-            .map(|(uid, score)| {
-                let normalized_weight = ((score / max_score) * u16::MAX as f64) as u16;
-                NormalizedWeight {
-                    uid: *uid,
-                    weight: normalized_weight,
-                }
-            })
-            .collect();
-
-        // Log normalized weights for debugging
-        for nw in result.iter() {
-            let uid: u16 = nw.uid;
-            let weight: u16 = nw.weight;
-            tracing::debug!("Miner UID {} -> normalized weight {}", uid, weight);
-        }
-
-        Ok(result)
-    }
-
     /// Submit weights to chain using the provided set_weights_payload function
     async fn submit_weights_to_chain(
         &self,
@@ -382,28 +328,6 @@ impl WeightSetter {
             .get_metagraph(self.config.netuid)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to fetch metagraph: {}", e))
-    }
-
-    /// Process a completed executor validation and update the miner's score
-    pub async fn process_executor_validation(
-        &self,
-        miner_uid: MinerUid,
-        executor_id: ExecutorId,
-        verification_log: &VerificationLog,
-    ) -> Result<()> {
-        // Extract validation details from the verification log
-        let _validation_result = self.extract_validation_result(executor_id, verification_log)?;
-
-        // Get all recent validations for this miner
-        let recent_validations = self
-            .get_recent_miner_validations(miner_uid, 24) // Last 24 hours
-            .await?;
-
-        // Update the miner's GPU profile using the new system
-        self.update_miner_gpu_profile(miner_uid, recent_validations)
-            .await?;
-
-        Ok(())
     }
 
     /// Extract validation result from verification log
@@ -622,71 +546,6 @@ impl WeightSetter {
         info!("Completed updating all miner scores");
         Ok(())
     }
-}
-
-/// Calculate aggregated miner scores from database
-pub async fn calculate_miner_scores_from_database(
-    persistence: &SimplePersistence,
-    hours: u32,
-) -> Result<HashMap<MinerUid, f64>> {
-    let cutoff_time = chrono::Utc::now() - chrono::Duration::hours(hours as i64);
-
-    let query = r#"
-        SELECT 
-            me.miner_id,
-            COUNT(DISTINCT vl.executor_id) as executor_count,
-            COUNT(vl.id) as total_validations,
-            SUM(CASE WHEN vl.success = 1 THEN 1 ELSE 0 END) as successful_validations,
-            AVG(CASE WHEN vl.success = 1 THEN vl.score ELSE 0 END) as avg_score
-        FROM miner_executors me
-        JOIN verification_logs vl ON me.executor_id = vl.executor_id
-        WHERE vl.timestamp >= ?
-        GROUP BY me.miner_id
-    "#;
-
-    let rows = sqlx::query(query)
-        .bind(cutoff_time.to_rfc3339())
-        .fetch_all(persistence.pool())
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to calculate miner scores: {}", e))?;
-
-    let mut scores = HashMap::new();
-
-    for row in rows {
-        let miner_id: String = row.get("miner_id");
-        if let Some(uid_str) = miner_id.strip_prefix("miner_") {
-            if let Ok(uid) = uid_str.parse::<u16>() {
-                let miner_uid = MinerUid::new(uid);
-
-                let executor_count: i64 = row.get("executor_count");
-                let total_validations: i64 = row.get("total_validations");
-                let successful_validations: i64 = row.get("successful_validations");
-                let avg_score: Option<f64> = row.get("avg_score");
-
-                // Calculate composite score
-                let success_rate = if total_validations > 0 {
-                    successful_validations as f64 / total_validations as f64
-                } else {
-                    0.0
-                };
-
-                let base_score = avg_score.unwrap_or(0.0) * success_rate;
-                let executor_bonus = (executor_count as f64 * 0.1).min(0.5); // Bonus for multiple executors
-
-                let final_score = (base_score * (1.0 + executor_bonus)).min(1.0);
-
-                scores.insert(miner_uid, final_score);
-
-                debug!(
-                    "Miner {} score: {:.4} (executors: {}, validations: {}, success rate: {:.2})",
-                    uid, final_score, executor_count, total_validations, success_rate
-                );
-            }
-        }
-    }
-
-    info!("Calculated scores for {} miners", scores.len());
-    Ok(scores)
 }
 
 #[cfg(test)]

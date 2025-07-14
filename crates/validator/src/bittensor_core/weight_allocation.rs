@@ -7,14 +7,14 @@ use common::identity::MinerUid;
 
 pub struct WeightAllocationEngine {
     emission_config: EmissionConfig,
-    min_score_threshold: f64,
+    _min_score_threshold: f64,
 }
 
 impl WeightAllocationEngine {
     pub fn new(emission_config: EmissionConfig, min_score_threshold: f64) -> Self {
         Self {
             emission_config,
-            min_score_threshold,
+            _min_score_threshold: min_score_threshold,
         }
     }
 
@@ -185,30 +185,6 @@ impl WeightAllocationEngine {
         Ok(filtered)
     }
 
-    /// Calculate category weight pools based on allocation percentages
-    fn calculate_category_pools(
-        &self,
-        total_remaining_weight: u64,
-        filtered_miners: &HashMap<String, Vec<(MinerUid, f64)>>,
-    ) -> Result<HashMap<String, u64>> {
-        let mut category_pools = HashMap::new();
-
-        for category in filtered_miners.keys() {
-            if let Some(allocation_percentage) = self.emission_config.get_gpu_allocation(category) {
-                let weight_pool =
-                    (total_remaining_weight as f64 * allocation_percentage / 100.0) as u64;
-                category_pools.insert(category.clone(), weight_pool);
-            } else {
-                warn!(
-                    category = %category,
-                    "No allocation percentage configured for category"
-                );
-            }
-        }
-
-        Ok(category_pools)
-    }
-
     /// Calculate weight pools for ALL configured categories (including empty ones)
     fn calculate_all_category_pools(
         &self,
@@ -330,28 +306,6 @@ impl WeightAllocationEngine {
 
         Ok(())
     }
-
-    /// Update emission configuration
-    pub fn update_emission_config(&mut self, new_config: EmissionConfig) -> Result<()> {
-        new_config.validate()?;
-        self.emission_config = new_config;
-        Ok(())
-    }
-
-    /// Get current emission configuration
-    pub fn get_emission_config(&self) -> &EmissionConfig {
-        &self.emission_config
-    }
-
-    /// Get minimum score threshold
-    pub fn get_min_score_threshold(&self) -> f64 {
-        self.min_score_threshold
-    }
-
-    /// Set minimum score threshold
-    pub fn set_min_score_threshold(&mut self, threshold: f64) {
-        self.min_score_threshold = threshold.clamp(0.0, 1.0);
-    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -445,18 +399,6 @@ mod tests {
 
         let burn_alloc = engine_no_burn.calculate_burn_allocation(10000).unwrap();
         assert!(burn_alloc.is_none());
-    }
-
-    #[test]
-    fn test_category_pool_calculation() {
-        let config = create_test_config();
-        let engine = WeightAllocationEngine::new(config, 0.5);
-
-        let miners = create_test_miners();
-        let pools = engine.calculate_category_pools(9000, &miners).unwrap();
-
-        assert_eq!(pools.get("H100"), Some(&5400)); // 60% of 9000
-        assert_eq!(pools.get("H200"), Some(&3600)); // 40% of 9000
     }
 
     #[test]
@@ -609,41 +551,6 @@ mod tests {
     }
 
     #[test]
-    fn test_config_updates() {
-        let config = create_test_config();
-        let mut engine = WeightAllocationEngine::new(config, 0.5);
-
-        // Test valid config update
-        let mut new_config = create_test_config();
-        new_config.burn_percentage = 20.0;
-        assert!(engine.update_emission_config(new_config).is_ok());
-        assert_eq!(engine.get_emission_config().burn_percentage, 20.0);
-
-        // Test invalid config update
-        let mut invalid_config = create_test_config();
-        invalid_config.burn_percentage = 150.0; // Invalid
-        assert!(engine.update_emission_config(invalid_config).is_err());
-    }
-
-    #[test]
-    fn test_score_threshold_functions() {
-        let config = create_test_config();
-        let mut engine = WeightAllocationEngine::new(config, 0.5);
-
-        assert_eq!(engine.get_min_score_threshold(), 0.5);
-
-        engine.set_min_score_threshold(0.8);
-        assert_eq!(engine.get_min_score_threshold(), 0.8);
-
-        // Test clamping
-        engine.set_min_score_threshold(1.5);
-        assert_eq!(engine.get_min_score_threshold(), 1.0);
-
-        engine.set_min_score_threshold(-0.5);
-        assert_eq!(engine.get_min_score_threshold(), 0.0);
-    }
-
-    #[test]
     fn test_calculate_all_category_pools() {
         let config = create_test_config();
         let engine = WeightAllocationEngine::new(config, 0.0);
@@ -738,7 +645,7 @@ mod tests {
 
         // No miners, so everything gets burned
         let empty_miners = HashMap::new();
-        let distribution = engine.calculate_weight_distribution(empty_miners).unwrap();
+        let _distribution = engine.calculate_weight_distribution(empty_miners).unwrap();
 
         // Burn weight should be clamped to u16::MAX
         // let burn = distribution.burn_allocation.unwrap();
