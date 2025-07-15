@@ -25,6 +25,10 @@ services:
       - "8080:8080"     # Server/API port
       - "9090:9090"     # Metrics port
 
+    dns:
+      - 1.1.1.1
+      - 1.0.0.1
+
     networks:
       - basilica_network
 
@@ -53,11 +57,13 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
       - WATCHTOWER_CLEANUP=true
-      - WATCHTOWER_POLL_INTERVAL=300
+      - WATCHTOWER_POLL_INTERVAL=60
       - WATCHTOWER_LABEL_ENABLE=true
-    command: --label-enable --cleanup --interval 300
+    dns:
+      - 1.1.1.1
+      - 1.0.0.1
+    command: --label-enable --cleanup --interval 60
 
 networks:
   basilica_network:
     driver: bridge
-
