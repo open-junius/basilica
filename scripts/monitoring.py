@@ -14,26 +14,52 @@
 Basilica Bittensor Network Monitor
 
 Monitor extrinsics and transactions on a Bittensor substrate blockchain,
-specifically focusing on miner and validator operations.
+specifically focusing on miner and validator operations, with comprehensive
+weights and incentives analysis.
 
 Usage:
     ./monitoring.py                              # Monitor local network
     ./monitoring.py --network test               # Monitor testnet
     ./monitoring.py --network finney --netuid 1  # Monitor mainnet subnet 1
     ./monitoring.py --network ws://custom:9944   # Custom node URL
+    ./monitoring.py --show-incentives            # Show weights and incentives every 50 blocks
+    ./monitoring.py --weights-only               # Show weights and incentives once and exit
+    ./monitoring.py --coldkey 5GrwvaEF5ZtKh...   # Filter incentives by coldkey
 
 The tool monitors and displays:
 - Miner registrations (serve_axon)
 - Validator weight updates (set_weights)
 - Other SubtensorModule transactions from known miners/validators
+- Weights and incentives distribution with detailed analysis
+- Weight consensus across validators
+- Epoch timing and subnet information
 
-Example output:
+Weights and Incentives Features:
+- Top neurons by incentive with stake information
+- Individual validator weight distributions
+- Weight consensus analysis (which neurons receive most total weight)
+- Epoch timing and blocks until next epoch
+- Subnet tempo and validator information
+- Coldkey filtering for specific neuron tracking
+
+Example transaction output:
     2025-07-02 14:32:01 Block 12345 Extrinsic 2
       Type: miner
       Call: SubtensorModule.serve_axon
       Signer: 5GrwvaEF5ZtKh...
       Axon: 192.168.1.100:8091
       Netuid: 1
+
+Example weights output:
+    Top validators by stake and their weight distributions:
+    1. Validator UID 204 (Stake: 249530.06)
+       Sets weights on 25 neurons:
+         UID  15: 0.0456
+         UID  23: 0.0398
+
+    Weight Consensus (neurons receiving most total weight):
+     1. UID  15: 0.2345 total weight from 8 validators
+     2. UID  23: 0.1987 total weight from 6 validators
 
 Press Ctrl+C to stop monitoring.
 """
@@ -49,10 +75,19 @@ from substrateinterface import SubstrateInterface
 
 
 class Monitor:
-    def __init__(self, network: str = "local", netuid: int = 1, show_failures: bool = True):
+    def __init__(
+        self,
+        network: str = "local",
+        netuid: int = 1,
+        show_failures: bool = True,
+        coldkey: str | None = None,
+        show_incentives: bool = False,
+    ):
         self.network = network
         self.netuid = netuid
         self.show_failures = show_failures
+        self.coldkey = coldkey
+        self.show_incentives = show_incentives
         self.substrate = None
         self.subtensor = None
         self.known_miners: Set[str] = set()
@@ -100,6 +135,196 @@ class Monitor:
             )
         except Exception as e:
             print(f"Warning: Failed to load metagraph: {e}")
+
+    def display_weights_and_incentives(self):
+        """Display current weights and incentives information."""
+        if not self.show_incentives:
+            return
+
+        try:
+            current_block = self.subtensor.get_current_block()
+
+            # Get subnet info for epoch calculations
+            subnet_info = self.subtensor.get_subnet_info(netuid=self.netuid)
+            tempo = subnet_info.tempo if subnet_info else 360  # Default tempo
+
+            # Calculate next epoch block
+            blocks_since_last_epoch = current_block % tempo
+            blocks_until_next_epoch = tempo - blocks_since_last_epoch
+            next_epoch_block = current_block + blocks_until_next_epoch
+
+            metagraph = self.subtensor.metagraph(netuid=self.netuid)
+
+            # Try to sync the metagraph to get weight data
+            try:
+                metagraph.sync(subtensor=self.subtensor)
+                print(f"Metagraph synced. Weight matrix shape: {metagraph.W.shape}")
+                print(f"Weights attribute shape: {metagraph.weights.shape}")
+
+                # Check if weights might be stored differently
+                if hasattr(metagraph, "bonds"):
+                    print(f"Bonds shape: {metagraph.bonds.shape}")
+
+                # Check for any validators with validator_permit
+                validator_permits = sum(
+                    1
+                    for n in metagraph.neurons
+                    if hasattr(n, "validator_permit") and n.validator_permit
+                )
+                print(f"Validators with permits: {validator_permits}")
+
+            except Exception as e:
+                print(f"Warning: Failed to sync metagraph: {e}")
+
+            neurons = metagraph.neurons
+
+            print(f"\n{'=' * 60}")
+            print(f"WEIGHTS & INCENTIVES - SUBNET {self.netuid}")
+            print(f"{'=' * 60}")
+            print(f"Current block: {current_block}")
+            print(f"Next epoch starts at block: {next_epoch_block}")
+            print(f"Blocks until next epoch: {blocks_until_next_epoch}")
+            print(f"Tempo: {tempo}")
+            print(f"Total neurons: {len(neurons)}")
+
+            if self.coldkey:
+                filtered_neurons = [n for n in neurons if n.coldkey == self.coldkey]
+                if filtered_neurons:
+                    print(f"\nColdkey: {self.coldkey}")
+                    print("-" * 40)
+                    total_incentives = 0.0
+                    for neuron in filtered_neurons:
+                        print(f"UID: {neuron.uid}\t-> Incentive: {neuron.incentive:.4f}")
+                        total_incentives += neuron.incentive
+                    print("-" * 40)
+                    print(f"Total incentives: {total_incentives:.4f}")
+                else:
+                    print(f"\nNo neurons found for coldkey: {self.coldkey}")
+            else:
+                print("\nTop 10 neurons by incentive:")
+                print("-" * 40)
+                sorted_neurons = sorted(neurons, key=lambda n: n.incentive, reverse=True)
+                for i, neuron in enumerate(sorted_neurons[:10]):
+                    stake_value = (
+                        float(neuron.stake) if hasattr(neuron.stake, "__float__") else neuron.stake
+                    )
+                    print(
+                        f"{i + 1:2d}. UID: {neuron.uid:3d} | Incentive: {neuron.incentive:.4f} | Stake: {stake_value}"
+                    )
+
+            # Display weight distributions
+            self.display_weight_distributions(metagraph)
+
+            print(f"{'=' * 60}\n")
+
+        except Exception as e:
+            print(f"Error displaying weights and incentives: {e}")
+
+    def display_weight_distributions(self, metagraph):
+        """Display weight distributions from validators."""
+        try:
+            print("\nWEIGHT DISTRIBUTIONS:")
+            print("-" * 60)
+
+            validators = [
+                n
+                for n in metagraph.neurons
+                if hasattr(n, "validator_permit") and n.validator_permit
+            ]
+
+            if not validators:
+                print("No validators found in subnet")
+                return
+
+            # Sort validators by stake (descending)
+            validators_by_stake = sorted(validators, key=lambda n: n.stake, reverse=True)
+
+            print(f"Found {len(validators)} validators")
+            print("Top validators by stake and their weight distributions:")
+            print()
+
+            for i, validator in enumerate(validators_by_stake[:5]):  # Show top 5 validators
+                stake_value = (
+                    float(validator.stake)
+                    if hasattr(validator.stake, "__float__")
+                    else validator.stake
+                )
+                print(f"{i + 1}. Validator UID {validator.uid} (Stake: {stake_value})")
+
+                # Get weights set by this validator from the metagraph
+                try:
+                    # Access weights through the metagraph weights attribute
+                    if hasattr(metagraph, "weights") and metagraph.weights.shape[0] > 0:
+                        validator_weights = metagraph.weights[validator.uid]
+
+                        # Create list of (uid, weight) pairs and sort by weight
+                        weight_pairs = []
+                        for uid, weight in enumerate(validator_weights):
+                            if weight > 0:
+                                weight_pairs.append((uid, float(weight)))
+
+                        # Sort by weight (descending)
+                        weight_pairs.sort(key=lambda x: x[1], reverse=True)
+
+                        if weight_pairs:
+                            print(f"   Sets weights on {len(weight_pairs)} neurons:")
+                            for uid, weight in weight_pairs[:10]:  # Show top 10 weights
+                                print(f"     UID {uid:3d}: {weight:.4f}")
+
+                            if len(weight_pairs) > 10:
+                                print(f"     ... and {len(weight_pairs) - 10} more")
+                        else:
+                            print("   No weights set")
+                    else:
+                        print("   No weight data available - weights matrix is empty")
+                except Exception as e:
+                    print(f"   Weight data not available: {e}")
+                print()
+
+            # Show weight consensus (which neurons receive the most total weight)
+            print("Weight Consensus (neurons receiving most total weight):")
+            print("-" * 50)
+
+            # Calculate total weight received by each neuron
+            total_weights_received = {}
+            try:
+                if hasattr(metagraph, "weights") and metagraph.weights.shape[0] > 0:
+                    for validator in validators:
+                        try:
+                            validator_weights = metagraph.weights[validator.uid]
+                            for uid, weight in enumerate(validator_weights):
+                                if weight > 0:
+                                    total_weights_received[uid] = total_weights_received.get(
+                                        uid, 0
+                                    ) + float(weight)
+                        except Exception:
+                            continue
+
+                    # Sort by total weight received
+                    sorted_by_total_weight = sorted(
+                        total_weights_received.items(), key=lambda x: x[1], reverse=True
+                    )
+
+                    for i, (uid, total_weight) in enumerate(sorted_by_total_weight[:10]):
+                        validator_count = sum(
+                            1
+                            for v in validators
+                            if uid < len(metagraph.weights[v.uid])
+                            and metagraph.weights[v.uid][uid] > 0
+                        )
+                        print(
+                            f"{i + 1:2d}. UID {uid:3d}: {total_weight:.4f} total weight from {validator_count} validators"
+                        )
+                else:
+                    print("No weight data available - weights matrix is empty")
+                    print("This could mean:")
+                    print("- Validators haven't set weights yet in this tempo period")
+                    print("- The subnet is new or inactive")
+            except Exception as e:
+                print(f"Weight consensus calculation failed: {e}")
+
+        except Exception as e:
+            print(f"Error displaying weight distributions: {e}")
 
     def categorize_address(self, address: str) -> str:
         """Categorize an address as miner, validator, or unknown."""
@@ -256,6 +481,10 @@ class Monitor:
             print("Monitoring both successful and failed transactions")
         else:
             print("Monitoring successful transactions only")
+        if self.show_incentives:
+            print("Weights and incentives will be displayed every 50 blocks")
+            print("Displaying initial weights and incentives...")
+            self.display_weights_and_incentives()
         print("Press Ctrl+C to stop\n")
 
         last_block_hash = None
@@ -273,6 +502,10 @@ class Monitor:
                         if block:
                             block_number = block["header"]["number"]
                             self.block_count += 1
+
+                            # Display weights and incentives every 50 blocks
+                            if self.show_incentives and self.block_count % 50 == 0:
+                                self.display_weights_and_incentives()
 
                             # Progress indicator every 10 blocks
                             if self.block_count % 10 == 0:
@@ -303,6 +536,8 @@ class Monitor:
             print(f"Found {self.extrinsic_count} SubtensorModule extrinsics")
             if self.show_failures:
                 print(f"Failed transactions detected: {self.failed_count}")
+            if self.show_incentives:
+                self.display_weights_and_incentives()
 
 
 @click.command()
@@ -311,15 +546,39 @@ class Monitor:
 )
 @click.option("--netuid", default=1, type=int, help="Network UID to monitor")
 @click.option("--no-failures", is_flag=True, help="Don't show failed transactions")
-def main(network: str, netuid: int, no_failures: bool):
+@click.option("--coldkey", type=str, help="Coldkey to filter incentives display")
+@click.option("--show-incentives", is_flag=True, help="Show weights and incentives every 50 blocks")
+@click.option("--weights-only", is_flag=True, help="Show weights and incentives once and exit")
+def main(
+    network: str,
+    netuid: int,
+    no_failures: bool,
+    coldkey: str | None,
+    show_incentives: bool,
+    weights_only: bool,
+):
     """Monitor Bittensor blockchain for miner and validator extrinsics."""
     print("Basilica Network Monitor")
     print(f"Network: {network}, Netuid: {netuid}")
+    if coldkey:
+        print(f"Coldkey filter: {coldkey}")
+    if show_incentives:
+        print("Incentives monitoring: enabled")
     print("-" * 50)
 
-    monitor = Monitor(network=network, netuid=netuid, show_failures=not no_failures)
+    monitor = Monitor(
+        network=network,
+        netuid=netuid,
+        show_failures=not no_failures,
+        coldkey=coldkey,
+        show_incentives=show_incentives or weights_only,
+    )
     monitor.connect()
-    monitor.monitor()
+
+    if weights_only:
+        monitor.display_weights_and_incentives()
+    else:
+        monitor.monitor()
 
 
 if __name__ == "__main__":
