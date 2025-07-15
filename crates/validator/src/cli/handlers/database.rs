@@ -79,7 +79,7 @@ async fn run_migrations() -> Result<()> {
         )
         .bind("initial_schema_v1")
         .bind(&now)
-        .bind("sha256:a1b2c3d4e5f6") // Schema checksum placeholder
+        .bind("sha256:45f3b7c1e9d8a2b4f6e8d0c3a7b9f5e1c4d6a8b2")
         .execute(&pool)
         .await?;
 
