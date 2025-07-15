@@ -189,12 +189,13 @@ impl WeightSetter {
         let version_key = self.get_version_key().await?;
 
         info!(
-            "Submitting {} weights with version key {}",
-            normalized_weights.len(),
-            version_key
+            netuid = self.config.netuid,
+            weight_count = normalized_weights.len(),
+            version_key = version_key,
+            "Preparing to submit weights to chain"
         );
 
-        // Submit weights to chain
+        // Submit weights to chain with enhanced error handling
         self.submit_weights_to_chain(normalized_weights.clone(), version_key)
             .await?;
 
@@ -271,21 +272,128 @@ impl WeightSetter {
         normalized_weights: Vec<NormalizedWeight>,
         version_key: u64,
     ) -> Result<()> {
+        // Pre-validate weights before submission
+        self.validate_weights_before_submission(&normalized_weights)?;
+
+        let submission_start = std::time::Instant::now();
+        let current_block = self.get_current_block().await.unwrap_or(0);
+
+        info!(
+            netuid = self.config.netuid,
+            version_key = version_key,
+            weight_count = normalized_weights.len(),
+            current_block = current_block,
+            "Initiating weight submission to chain"
+        );
+
+        // Log individual weights at debug level for troubleshooting
+        for weight in &normalized_weights {
+            debug!(
+                uid = weight.uid,
+                weight = weight.weight,
+                netuid = self.config.netuid,
+                "Weight submission detail"
+            );
+        }
+
         // Create the payload using the provided function
-        let payload =
-            bittensor::set_weights_payload(self.config.netuid, normalized_weights, version_key);
+        let payload = bittensor::set_weights_payload(
+            self.config.netuid,
+            normalized_weights.clone(),
+            version_key,
+        );
 
         // Submit the transaction
         match self.bittensor_service.submit_extrinsic(payload).await {
             Ok(_) => {
-                info!("Successfully submitted weights to chain");
+                let duration = submission_start.elapsed();
+                info!(
+                    netuid = self.config.netuid,
+                    version_key = version_key,
+                    weight_count = normalized_weights.len(),
+                    current_block = current_block,
+                    duration_ms = duration.as_millis(),
+                    "Successfully submitted weights to chain"
+                );
                 Ok(())
             }
             Err(e) => {
-                error!("Failed to submit weights: {}", e);
-                Err(anyhow::anyhow!("Weight submission failed: {}", e))
+                let duration = submission_start.elapsed();
+                let error_context = self.analyze_submission_error(&anyhow::anyhow!("{}", e));
+
+                error!(
+                    netuid = self.config.netuid,
+                    version_key = version_key,
+                    weight_count = normalized_weights.len(),
+                    current_block = current_block,
+                    duration_ms = duration.as_millis(),
+                    error = %e,
+                    error_type = %error_context,
+                    weights = ?normalized_weights,
+                    "Failed to submit weights to chain"
+                );
+
+                Err(anyhow::anyhow!(
+                    "Weight submission failed ({}): {} - Context: {}",
+                    error_context,
+                    e,
+                    self.format_submission_context(&normalized_weights, version_key)
+                ))
             }
         }
+    }
+
+    /// Validate weights before chain submission
+    fn validate_weights_before_submission(&self, weights: &[NormalizedWeight]) -> Result<()> {
+        if weights.is_empty() {
+            return Err(anyhow::anyhow!("Cannot submit empty weight vector"));
+        }
+
+        let mut seen_uids = std::collections::HashSet::new();
+        for weight in weights {
+            if !seen_uids.insert(weight.uid) {
+                return Err(anyhow::anyhow!("Duplicate UID {} in weights", weight.uid));
+            }
+        }
+
+        let total_weight: u64 = weights.iter().map(|w| w.weight as u64).sum();
+        if total_weight > u16::MAX as u64 {
+            return Err(anyhow::anyhow!(
+                "Total weight {} exceeds maximum",
+                total_weight
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Analyze submission error
+    fn analyze_submission_error(&self, error: &anyhow::Error) -> &'static str {
+        let error_str = error.to_string().to_lowercase();
+        if error_str.contains("duplicate") {
+            "DuplicateUids"
+        } else if error_str.contains("timeout") {
+            "Timeout"
+        } else if error_str.contains("fee") {
+            "InsufficientFees"
+        } else if error_str.contains("nonce") {
+            "InvalidNonce"
+        } else if error_str.contains("weight") {
+            "WeightValidation"
+        } else if error_str.contains("network") {
+            "NetworkError"
+        } else {
+            "Unknown"
+        }
+    }
+
+    /// Format submission context for error reporting
+    fn format_submission_context(&self, weights: &[NormalizedWeight], version_key: u64) -> String {
+        let uid_list: Vec<u16> = weights.iter().map(|w| w.uid).collect();
+        format!(
+            "netuid={}, version_key={}, uids={:?}",
+            self.config.netuid, version_key, uid_list
+        )
     }
 
     /// Get version key for weight setting

@@ -62,8 +62,9 @@ impl WeightAllocationEngine {
         }
 
         // Distribute weights within each category
-        let mut all_weights = Vec::new();
+        let mut all_weights: Vec<NormalizedWeight> = Vec::new();
         let mut category_allocations = HashMap::new();
+        let mut aggregated_count = 0;
 
         for (category, miners) in filtered_miners {
             let category_weight_pool = all_category_pools.get(&category).copied().unwrap_or(0);
@@ -83,7 +84,7 @@ impl WeightAllocationEngine {
             category_allocations.insert(
                 category.clone(),
                 CategoryAllocation {
-                    gpu_model: category,
+                    gpu_model: category.clone(),
                     miner_count: miners.len() as u32,
                     total_score,
                     weight_pool: category_weight_pool,
@@ -91,16 +92,35 @@ impl WeightAllocationEngine {
                 },
             );
 
-            all_weights.extend(category_weights);
+            // Aggregate weights for miners that appear in multiple categories
+            for weight in category_weights {
+                if let Some(existing) = all_weights.iter_mut().find(|w| w.uid == weight.uid) {
+                    existing.weight =
+                        (existing.weight as u64 + weight.weight as u64).min(u16::MAX as u64) as u16;
+                    aggregated_count += 1;
+                } else {
+                    all_weights.push(weight);
+                }
+            }
         }
 
-        // Add burn allocation (including empty category burns)
         let total_burn_weight = burn_weight + empty_category_burn;
         if total_burn_weight > 0 {
-            all_weights.push(NormalizedWeight {
+            let burn_weight_entry = NormalizedWeight {
                 uid: self.emission_config.burn_uid,
                 weight: total_burn_weight.min(u16::MAX as u64) as u16,
-            });
+            };
+
+            if let Some(existing) = all_weights
+                .iter_mut()
+                .find(|w| w.uid == burn_weight_entry.uid)
+            {
+                existing.weight = (existing.weight as u64 + burn_weight_entry.weight as u64)
+                    .min(u16::MAX as u64) as u16;
+                aggregated_count += 1;
+            } else {
+                all_weights.push(burn_weight_entry);
+            }
         }
 
         // Validate final allocation
@@ -115,6 +135,7 @@ impl WeightAllocationEngine {
             total_burn = total_burn_weight,
             categories = category_allocations.len(),
             miners_served = miners_served,
+            aggregated_uids = aggregated_count,
             "Calculated weight distribution"
         );
 
@@ -638,17 +659,177 @@ mod tests {
     }
 
     #[test]
-    fn test_burn_weight_overflow_protection() {
-        let mut config = create_test_config();
-        config.burn_percentage = 90.0; // Very high burn
+    fn test_multi_category_miner_aggregation() {
+        let config = create_test_config();
         let engine = WeightAllocationEngine::new(config, 0.0);
 
-        // No miners, so everything gets burned
-        let empty_miners = HashMap::new();
-        let _distribution = engine.calculate_weight_distribution(empty_miners).unwrap();
+        // Create a miner that appears in both H100 and H200 categories
+        let mut miners = HashMap::new();
+        miners.insert(
+            "H100".to_string(),
+            vec![
+                (MinerUid::new(1), 0.8), // Miner 1 in H100
+                (MinerUid::new(2), 0.6), // Miner 2 only in H100
+            ],
+        );
+        miners.insert(
+            "H200".to_string(),
+            vec![
+                (MinerUid::new(1), 0.9), // Miner 1 also in H200 (multi-category)
+                (MinerUid::new(3), 0.7), // Miner 3 only in H200
+            ],
+        );
 
-        // Burn weight should be clamped to u16::MAX
-        // let burn = distribution.burn_allocation.unwrap();
-        // assert!(burn.weight <= u16::MAX);
+        let distribution = engine.calculate_weight_distribution(miners).unwrap();
+
+        // Verify no duplicate UIDs in final weights
+        let mut uid_counts = HashMap::new();
+        for weight in &distribution.weights {
+            *uid_counts.entry(weight.uid).or_insert(0) += 1;
+        }
+
+        // All UIDs should appear exactly once
+        for (uid, count) in uid_counts {
+            assert_eq!(
+                count, 1,
+                "UID {uid} appears {count} times, should be exactly 1"
+            );
+        }
+
+        // Miner 1 should have aggregated weight from both categories
+        let miner_1_weight = distribution
+            .weights
+            .iter()
+            .find(|w| w.uid == 1)
+            .expect("Miner 1 should be present in weights");
+
+        // Miner 1's weight should be > 0 (it was aggregated from two categories)
+        assert!(
+            miner_1_weight.weight > 0,
+            "Miner 1 should have positive aggregated weight"
+        );
+
+        // We should have exactly 4 weights: 3 miners + 1 burn
+        assert_eq!(distribution.weights.len(), 4);
+        assert_eq!(distribution.miners_served, 3);
+    }
+
+    #[test]
+    fn test_weight_aggregation_overflow_protection() {
+        let config = create_test_config();
+        let engine = WeightAllocationEngine::new(config, 0.0);
+
+        // Create scenario where weight aggregation could overflow u16
+        let mut miners = HashMap::new();
+        miners.insert(
+            "H100".to_string(),
+            vec![(MinerUid::new(1), 1.0)], // Miner gets all H100 allocation
+        );
+        miners.insert(
+            "H200".to_string(),
+            vec![(MinerUid::new(1), 1.0)], // Same miner gets all H200 allocation
+        );
+
+        let distribution = engine.calculate_weight_distribution(miners).unwrap();
+
+        // Find miner 1's aggregated weight
+        let miner_1_weight = distribution
+            .weights
+            .iter()
+            .find(|w| w.uid == 1)
+            .expect("Miner 1 should be present");
+
+        // Should still have valid allocation
+        assert!(miner_1_weight.weight > 0);
+    }
+
+    #[test]
+    fn test_no_duplicate_uids_in_any_scenario() {
+        let config = create_test_config();
+        let engine = WeightAllocationEngine::new(config, 0.0);
+
+        // Test various scenarios that could potentially create duplicates
+        let test_scenarios = vec![
+            // Scenario 1: Same miner in all categories
+            {
+                let mut miners = HashMap::new();
+                miners.insert("H100".to_string(), vec![(MinerUid::new(42), 0.8)]);
+                miners.insert("H200".to_string(), vec![(MinerUid::new(42), 0.9)]);
+                miners
+            },
+            // Scenario 2: Multiple miners with overlaps
+            {
+                let mut miners = HashMap::new();
+                miners.insert(
+                    "H100".to_string(),
+                    vec![
+                        (MinerUid::new(1), 0.8),
+                        (MinerUid::new(2), 0.6),
+                        (MinerUid::new(3), 0.4),
+                    ],
+                );
+                miners.insert(
+                    "H200".to_string(),
+                    vec![
+                        (MinerUid::new(2), 0.9), // Overlaps with H100
+                        (MinerUid::new(3), 0.7), // Overlaps with H100
+                        (MinerUid::new(4), 0.5), // Unique to H200
+                    ],
+                );
+                miners
+            },
+        ];
+
+        for (i, miners) in test_scenarios.into_iter().enumerate() {
+            let distribution = engine
+                .calculate_weight_distribution(miners)
+                .unwrap_or_else(|_| panic!("Scenario {} should succeed", i + 1));
+
+            // Verify no duplicate UIDs
+            let mut seen_uids = std::collections::HashSet::new();
+            for weight in &distribution.weights {
+                assert!(
+                    seen_uids.insert(weight.uid),
+                    "Scenario {}: Duplicate UID {} found in weights",
+                    i + 1,
+                    weight.uid
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_weight_conservation_with_aggregation() {
+        let config = create_test_config();
+        let engine = WeightAllocationEngine::new(config, 0.0);
+
+        // Create miners with significant overlap
+        let mut miners = HashMap::new();
+        miners.insert(
+            "H100".to_string(),
+            vec![(MinerUid::new(1), 0.5), (MinerUid::new(2), 0.5)],
+        );
+        miners.insert(
+            "H200".to_string(),
+            vec![
+                (MinerUid::new(1), 0.3), // Overlaps with H100
+                (MinerUid::new(3), 0.7),
+            ],
+        );
+
+        let distribution = engine.calculate_weight_distribution(miners).unwrap();
+
+        // Total weight should not exceed u16::MAX
+        let total_weight: u64 = distribution.weights.iter().map(|w| w.weight as u64).sum();
+        assert!(total_weight <= u16::MAX as u64);
+
+        // Should have reasonable weight distribution
+        assert!(total_weight > 0);
+
+        // Verify all expected miners are present
+        let uids: Vec<u16> = distribution.weights.iter().map(|w| w.uid).collect();
+        assert!(uids.contains(&1), "Miner 1 should be present");
+        assert!(uids.contains(&2), "Miner 2 should be present");
+        assert!(uids.contains(&3), "Miner 3 should be present");
     }
 }

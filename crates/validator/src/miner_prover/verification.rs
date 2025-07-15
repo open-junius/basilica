@@ -364,9 +364,27 @@ impl VerificationEngine {
         };
 
         // Step 4: Store individual executor verification results
+        // Construct MinerInfo from task data
+        let hotkey = Hotkey::new(task.miner_hotkey.clone())
+            .map_err(|e| anyhow::anyhow!("Invalid miner hotkey '{}': {}", task.miner_hotkey, e))?;
+
+        let miner_info = MinerInfo {
+            uid: MinerUid::new(task.miner_uid),
+            hotkey,
+            endpoint: task.miner_endpoint.clone(),
+            is_validator: false,
+            stake_tao: 0.0,
+            last_verified: None,
+            verification_score: overall_score,
+        };
+
         for result in &executor_results {
-            self.store_executor_verification_result(task.miner_uid, result)
-                .await?;
+            self.store_executor_verification_result_with_miner_info(
+                task.miner_uid,
+                result,
+                &miner_info,
+            )
+            .await?;
         }
 
         verification_steps.push(VerificationStep {
@@ -626,7 +644,7 @@ impl VerificationEngine {
                     "binary_score": if executor_result.binary_validation_successful { 0.5 } else { 0.0 }
                 }
             }),
-            2000, // duration_ms placeholder for executor verification
+            executor_result.execution_time.as_millis() as i64,
             if !executor_result.ssh_connection_successful {
                 Some("SSH connection failed".to_string())
             } else if !executor_result.binary_validation_successful {
@@ -670,6 +688,101 @@ impl VerificationEngine {
         // Ensure miner-executor relationship exists
         if let Err(e) = self
             .ensure_miner_executor_relationship(miner_uid, &executor_result.executor_id)
+            .await
+        {
+            warn!("Failed to ensure miner-executor relationship: {}", e);
+            // Don't fail the verification storage for this
+        }
+
+        info!(
+            "Executor verification result successfully stored to database for miner {}, executor {}: score={:.2}",
+            miner_uid, executor_result.executor_id, executor_result.verification_score
+        );
+
+        Ok(())
+    }
+
+    /// Store executor verification result with actual miner information
+    async fn store_executor_verification_result_with_miner_info(
+        &self,
+        miner_uid: u16,
+        executor_result: &ExecutorVerificationResult,
+        miner_info: &super::types::MinerInfo,
+    ) -> Result<()> {
+        info!(
+            "Storing executor verification result to database for miner {}, executor {}: score={:.2}",
+            miner_uid, executor_result.executor_id, executor_result.verification_score
+        );
+
+        // Create verification log entry for database storage
+        let verification_log = VerificationLog::new(
+            executor_result.executor_id.clone(),
+            self.validator_hotkey.to_string(),
+            "ssh_automation".to_string(),
+            executor_result.verification_score,
+            executor_result.ssh_connection_successful
+                && executor_result.binary_validation_successful,
+            serde_json::json!({
+                "miner_uid": miner_uid,
+                "executor_id": executor_result.executor_id,
+                "ssh_connection_successful": executor_result.ssh_connection_successful,
+                "binary_validation_successful": executor_result.binary_validation_successful,
+                "verification_method": "ssh_automation",
+                "executor_result": executor_result.executor_result,
+                "score_details": {
+                    "verification_score": executor_result.verification_score,
+                    "ssh_score": if executor_result.ssh_connection_successful { 0.5 } else { 0.0 },
+                    "binary_score": if executor_result.binary_validation_successful { 0.5 } else { 0.0 }
+                }
+            }),
+            executor_result.execution_time.as_millis() as i64,
+            if !executor_result.ssh_connection_successful {
+                Some("SSH connection failed".to_string())
+            } else if !executor_result.binary_validation_successful {
+                Some("Binary validation failed".to_string())
+            } else {
+                None
+            },
+        );
+
+        // Store directly to database to avoid repository trait issues
+        let query = r#"
+            INSERT INTO verification_logs (
+                id, executor_id, validator_hotkey, verification_type, timestamp,
+                score, success, details, duration_ms, error_message, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        "#;
+
+        if let Err(e) = sqlx::query(query)
+            .bind(verification_log.id.to_string())
+            .bind(&verification_log.executor_id)
+            .bind(&verification_log.validator_hotkey)
+            .bind(&verification_log.verification_type)
+            .bind(verification_log.timestamp.to_rfc3339())
+            .bind(verification_log.score)
+            .bind(if verification_log.success { 1 } else { 0 })
+            .bind(
+                serde_json::to_string(&verification_log.details)
+                    .unwrap_or_else(|_| "{}".to_string()),
+            )
+            .bind(verification_log.duration_ms)
+            .bind(&verification_log.error_message)
+            .bind(verification_log.created_at.to_rfc3339())
+            .bind(verification_log.updated_at.to_rfc3339())
+            .execute(self.persistence.pool())
+            .await
+        {
+            error!("Failed to store verification log: {}", e);
+            return Err(anyhow::anyhow!("Database storage failed: {}", e));
+        }
+
+        // Ensure miner-executor relationship exists with real miner data
+        if let Err(e) = self
+            .ensure_miner_executor_relationship_with_info(
+                miner_uid,
+                &executor_result.executor_id,
+                miner_info,
+            )
             .await
         {
             warn!("Failed to ensure miner-executor relationship: {}", e);
@@ -734,6 +847,145 @@ impl VerificationEngine {
                 "Miner-executor relationship already exists: {} -> {}",
                 miner_id, executor_id
             );
+        }
+
+        Ok(())
+    }
+
+    /// Ensure miner-executor relationship exists with real miner information
+    async fn ensure_miner_executor_relationship_with_info(
+        &self,
+        miner_uid: u16,
+        executor_id: &str,
+        miner_info: &super::types::MinerInfo,
+    ) -> Result<()> {
+        info!(
+            "Ensuring miner-executor relationship for miner {} and executor {} with real data",
+            miner_uid, executor_id
+        );
+
+        let miner_id = format!("miner_{miner_uid}");
+
+        // First ensure the miner exists in miners table with real data
+        self.ensure_miner_exists_with_info(miner_info).await?;
+
+        // Check if relationship already exists
+        let query =
+            "SELECT COUNT(*) as count FROM miner_executors WHERE miner_id = ? AND executor_id = ?";
+        let row = sqlx::query(query)
+            .bind(&miner_id)
+            .bind(executor_id)
+            .fetch_one(self.persistence.pool())
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to check miner-executor relationship: {}", e))?;
+
+        let count: i64 = row.get("count");
+
+        if count == 0 {
+            // Insert new relationship with required fields
+            let insert_query = r#"
+                INSERT OR IGNORE INTO miner_executors (
+                    id, miner_id, executor_id, grpc_address, gpu_count, gpu_specs, cpu_specs,
+                    location, status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+            "#;
+
+            let relationship_id = format!("{miner_id}_{executor_id}");
+
+            sqlx::query(insert_query)
+                .bind(&relationship_id)
+                .bind(&miner_id)
+                .bind(executor_id)
+                .bind(&miner_info.endpoint)
+                // -- these will be updated from verification details
+                .bind(0) // gpu_count
+                .bind("{}") // gpu_specs
+                .bind("{}") // cpu_specs
+                //---------
+                .bind("discovered") // location
+                .bind("verified") // status
+                .execute(self.persistence.pool())
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!("Failed to insert miner-executor relationship: {}", e)
+                })?;
+
+            info!(
+                "Created miner-executor relationship: {} -> {} with endpoint {}",
+                miner_id, executor_id, miner_info.endpoint
+            );
+        } else {
+            debug!(
+                "Miner-executor relationship already exists: {} -> {}",
+                miner_id, executor_id
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Ensure miner exists in miners table with real data
+    async fn ensure_miner_exists_with_info(
+        &self,
+        miner_info: &super::types::MinerInfo,
+    ) -> Result<()> {
+        let miner_id = format!("miner_{}", miner_info.uid.as_u16());
+
+        // Check if miner already exists
+        let query = "SELECT COUNT(*) as count FROM miners WHERE id = ?";
+        let row = sqlx::query(query)
+            .bind(&miner_id)
+            .fetch_one(self.persistence.pool())
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to check miner existence: {}", e))?;
+
+        let count: i64 = row.get("count");
+
+        if count == 0 {
+            // Insert new miner record with real data
+            let insert_query = r#"
+                INSERT OR IGNORE INTO miners (
+                    id, hotkey, endpoint, verification_score, uptime_percentage,
+                    last_seen, registered_at, updated_at, executor_info
+                ) VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now'), datetime('now'), ?)
+            "#;
+
+            sqlx::query(insert_query)
+                .bind(&miner_id)
+                .bind(miner_info.hotkey.to_string())
+                .bind(&miner_info.endpoint)
+                .bind(miner_info.verification_score)
+                .bind(0.0) // uptime_percentage
+                .bind("{}") // executor_info
+                .execute(self.persistence.pool())
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to insert miner: {}", e))?;
+
+            info!(
+                "Created miner record: {} with hotkey {} and endpoint {}",
+                miner_id,
+                miner_info.hotkey.to_string(),
+                miner_info.endpoint
+            );
+        } else {
+            // Update existing miner with latest information
+            let update_query = r#"
+                UPDATE miners SET
+                    hotkey = ?, endpoint = ?, verification_score = ?,
+                    last_seen = datetime('now'), updated_at = datetime('now')
+                WHERE id = ?
+            "#;
+
+            sqlx::query(update_query)
+                .bind(miner_info.hotkey.to_string())
+                .bind(&miner_info.endpoint)
+                .bind(miner_info.verification_score)
+                .bind(&miner_id)
+                .execute(self.persistence.pool())
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to update miner: {}", e))?;
+
+            debug!("Updated miner record: {} with latest data", miner_id);
         }
 
         Ok(())
@@ -1114,17 +1366,7 @@ impl VerificationEngine {
     async fn verify_single_executor(&self, executor: &ExecutorInfo) -> Result<f64> {
         info!("Verifying executor {}", executor.id);
 
-        // If we have dynamic discovery enabled, we need to get SSH credentials
-        if self.use_dynamic_discovery {
-            return self.verify_executor_dynamic(executor).await;
-        }
-
-        // Fallback to static verification (placeholder for now)
-        warn!(
-            "Static verification not implemented for executor {}",
-            executor.id
-        );
-        Ok(0.0)
+        self.verify_executor_dynamic(executor).await
     }
 
     /// Verify executor using dynamic SSH discovery
