@@ -146,6 +146,7 @@ mod tests {
 burn_percentage = 15.0
 burn_uid = 123
 weight_set_interval_blocks = 720
+weight_version_key = 0
 
 [gpu_allocations]
 H100 = 25.0
