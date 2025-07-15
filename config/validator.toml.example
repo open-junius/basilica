@@ -112,6 +112,10 @@ burn_uid = 204
 # 360 blocks = ~1 hour on Bittensor (12 seconds per block)
 weight_set_interval_blocks = 360
 
+# Version key for weight setting operations
+# This prevents replay attacks by incrementing with each weight set
+weight_version_key = 0
+
 
 # GPU model allocation percentages
 # These percentages determine how emissions
