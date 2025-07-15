@@ -139,8 +139,7 @@ impl WeightSetter {
             .await?;
 
         if miners_by_category.is_empty() {
-            warn!("No miners found in any GPU category");
-            return Ok(());
+            warn!("No miners found in any GPU category - proceeding with burn allocation");
         }
 
         info!(
@@ -155,8 +154,7 @@ impl WeightSetter {
             .calculate_weight_distribution(miners_by_category)?;
 
         if weight_distribution.miners_served == 0 {
-            warn!("No miners served by weight allocation");
-            return Ok(());
+            warn!("No miners served by weight allocation - proceeding with burn-only weights");
         }
 
         info!(
@@ -193,6 +191,11 @@ impl WeightSetter {
                 weight: w.weight,
             })
             .collect();
+
+        if normalized_weights.is_empty() {
+            warn!("IMPORTANT! No weights (or burn) to submit after allocation - skipping weight setting");
+            return Ok(());
+        }
 
         // 7. Get version key and submit weights
         let version_key = self.get_version_key().await?;
