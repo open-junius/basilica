@@ -201,6 +201,7 @@ H200 = 30.0
             burn_uid: 456,
             gpu_allocations: HashMap::new(), // Empty - should use default
             weight_set_interval_blocks: 0,   // Invalid - should use default
+            weight_version_key: 0,
         };
 
         let merged = partial_config.merge_with_defaults();
@@ -335,6 +336,7 @@ H200 = 30.0
             burn_uid: 0,
             gpu_allocations: allocations,
             weight_set_interval_blocks: 360,
+            weight_version_key: 0,
         };
 
         // Should be valid because total is very close to 100.0
@@ -351,6 +353,7 @@ H200 = 30.0
             burn_uid: 0,
             gpu_allocations: allocations,
             weight_set_interval_blocks: 360,
+            weight_version_key: 0,
         };
 
         // Should be invalid because total is 99.0 (difference > 0.01)

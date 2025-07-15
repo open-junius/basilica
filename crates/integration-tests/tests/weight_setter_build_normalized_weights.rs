@@ -23,6 +23,7 @@ impl WeightSetterTester {
                 allocations
             },
             weight_set_interval_blocks: 100,
+            weight_version_key: 0,
         };
 
         let weight_allocation_engine = WeightAllocationEngine::new(emission_config, 0.5);

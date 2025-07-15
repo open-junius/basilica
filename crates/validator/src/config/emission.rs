@@ -16,6 +16,10 @@ pub struct EmissionConfig {
 
     /// Blocks between weight setting
     pub weight_set_interval_blocks: u64,
+
+    /// Version key for weight setting operations
+    /// This prevents replay attacks by incrementing with each weight set
+    pub weight_version_key: u64,
 }
 
 impl EmissionConfig {
@@ -104,6 +108,7 @@ impl EmissionConfig {
             burn_uid: 999,
             gpu_allocations,
             weight_set_interval_blocks: 360,
+            weight_version_key: 0,
         }
     }
 
@@ -165,6 +170,7 @@ impl Default for EmissionConfig {
             burn_uid: 0,
             gpu_allocations,
             weight_set_interval_blocks: 360,
+            weight_version_key: 0,
         }
     }
 }

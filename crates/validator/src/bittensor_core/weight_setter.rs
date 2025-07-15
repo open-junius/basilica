@@ -48,7 +48,7 @@ pub struct WeightSetter {
     last_weight_set_block: Arc<tokio::sync::Mutex<u64>>,
     gpu_scoring_engine: Arc<GpuScoringEngine>,
     weight_allocation_engine: Arc<WeightAllocationEngine>,
-    _emission_config: EmissionConfig,
+    emission_config: EmissionConfig,
 }
 
 impl WeightSetter {
@@ -79,7 +79,7 @@ impl WeightSetter {
             last_weight_set_block: Arc::new(tokio::sync::Mutex::new(0)),
             gpu_scoring_engine,
             weight_allocation_engine,
-            _emission_config: emission_config,
+            emission_config,
         })
     }
 
@@ -91,6 +91,15 @@ impl WeightSetter {
         info!(
             "Starting weight setter - will set weights every {} blocks, min_score_threshold: {:.2}",
             self.blocks_per_weight_set, self.min_score_threshold
+        );
+
+        // Initialize last weight set block from storage or chain
+        let last_weight_block = self.get_last_weight_set_block().await?;
+        *self.last_weight_set_block.lock().await = last_weight_block;
+
+        info!(
+            "Initialized last weight set block to: {}, will wait {} blocks before first weight setting",
+            last_weight_block, self.blocks_per_weight_set
         );
 
         loop {
@@ -109,11 +118,23 @@ impl WeightSetter {
 
             // Check if it's time to set weights
             if current_block >= last_block + self.blocks_per_weight_set {
+                info!(
+                    "Setting weights at block {} (last set at block {}, interval: {} blocks)",
+                    current_block, last_block, self.blocks_per_weight_set
+                );
                 if let Err(e) = self.set_weights_for_miners().await {
                     error!("Failed to set weights at block {}: {}", current_block, e);
                 } else {
                     *self.last_weight_set_block.lock().await = current_block;
+                    // Store the last weight set block for persistence across restarts
+                    self.store_last_weight_set_block(current_block).await?;
                 }
+            } else {
+                let blocks_remaining = last_block + self.blocks_per_weight_set - current_block;
+                debug!(
+                    "Waiting to set weights: {} blocks remaining (current: {}, last: {}, interval: {})",
+                    blocks_remaining, current_block, last_block, self.blocks_per_weight_set
+                );
             }
         }
     }
@@ -195,6 +216,19 @@ impl WeightSetter {
             "Preparing to submit weights to chain"
         );
 
+        // Additional validation - check for duplicates before submission
+        let mut uid_check = std::collections::HashSet::new();
+        for weight in &normalized_weights {
+            if !uid_check.insert(weight.uid) {
+                error!("CRITICAL: Duplicate UID {} found in normalized weights before chain submission", weight.uid);
+                error!("Full weights vector: {:?}", normalized_weights);
+                return Err(anyhow::anyhow!(
+                    "Duplicate UID {} detected in final weights",
+                    weight.uid
+                ));
+            }
+        }
+
         // Submit weights to chain with enhanced error handling
         self.submit_weights_to_chain(normalized_weights.clone(), version_key)
             .await?;
@@ -206,12 +240,23 @@ impl WeightSetter {
         Ok(())
     }
 
-    /// Build normalized weights including both miner weights and burn allocation
+    /// Build normalized weights from weight distribution
     fn build_normalized_weights(
         &self,
         weight_distribution: &crate::bittensor_core::weight_allocation::WeightDistribution,
     ) -> Result<Vec<NormalizedWeight>> {
-        let mut normalized_weights: Vec<NormalizedWeight> = weight_distribution
+        debug!(
+            "Building normalized weights from {} distribution weights",
+            weight_distribution.weights.len()
+        );
+        for (i, w) in weight_distribution.weights.iter().enumerate() {
+            debug!(
+                "  Distribution weight {}: UID={}, weight={}",
+                i, w.uid, w.weight
+            );
+        }
+
+        let normalized_weights: Vec<NormalizedWeight> = weight_distribution
             .weights
             .iter()
             .map(|w| NormalizedWeight {
@@ -220,16 +265,15 @@ impl WeightSetter {
             })
             .collect();
 
-        // Include burn allocation if present
-        if let Some(burn_alloc) = &weight_distribution.burn_allocation {
-            normalized_weights.push(NormalizedWeight {
-                uid: burn_alloc.uid,
-                weight: burn_alloc.weight,
-            });
+        debug!("Built {} normalized weights", normalized_weights.len());
+        for (i, w) in normalized_weights.iter().enumerate() {
+            debug!(
+                "  Normalized weight {}: UID={}, weight={}",
+                i, w.uid, w.weight
+            );
         }
 
-        // The weight allocation engine guarantees at least burn allocation exists
-        // so this should never be empty, but assert to be safe
+        // The weight allocation engine already includes burn allocation in weights vector
         assert!(
             !normalized_weights.is_empty(),
             "Weight allocation engine produced no weights - this should never happen"
@@ -349,9 +393,21 @@ impl WeightSetter {
             return Err(anyhow::anyhow!("Cannot submit empty weight vector"));
         }
 
+        debug!("Validating {} weights before submission:", weights.len());
+        for (i, weight) in weights.iter().enumerate() {
+            debug!(
+                "  Weight {}: UID={}, weight={}",
+                i, weight.uid, weight.weight
+            );
+        }
+
         let mut seen_uids = std::collections::HashSet::new();
         for weight in weights {
             if !seen_uids.insert(weight.uid) {
+                error!(
+                    "Duplicate UID {} detected in weights: {:?}",
+                    weight.uid, weights
+                );
                 return Err(anyhow::anyhow!("Duplicate UID {} in weights", weight.uid));
             }
         }
@@ -398,16 +454,16 @@ impl WeightSetter {
 
     /// Get version key for weight setting
     async fn get_version_key(&self) -> Result<u64> {
-        // Version key should be incremented with each weight setting
+        // Use the version key from config and increment with each weight setting
         // This prevents replay attacks
         let key = format!("weight_version_key:{}", self.config.netuid);
 
-        let current_version = self
-            .storage
-            .get_i64(&key)
-            .await
-            .unwrap_or(Some(0))
-            .unwrap_or(0) as u64;
+        let current_version =
+            self.storage
+                .get_i64(&key)
+                .await
+                .unwrap_or(Some(self.emission_config.weight_version_key as i64))
+                .unwrap_or(self.emission_config.weight_version_key as i64) as u64;
 
         let new_version = current_version + 1;
 
@@ -451,6 +507,40 @@ impl WeightSetter {
             .get_current_block()
             .await
             .map_err(|e| anyhow::anyhow!("Failed to get current block: {}", e))
+    }
+
+    /// Get the last weight set block from storage or initialize to current block
+    async fn get_last_weight_set_block(&self) -> Result<u64> {
+        let key = format!("last_weight_set_block:{}", self.config.netuid);
+
+        // Try to get from storage first
+        if let Some(stored_block) = self.storage.get_i64(&key).await.unwrap_or(None) {
+            let stored_block = stored_block as u64;
+            info!("Found stored last weight set block: {}", stored_block);
+            return Ok(stored_block);
+        }
+
+        // If not in storage, get current block and subtract interval to prevent immediate weight setting
+        let current_block = self.get_current_block().await?;
+        let safe_last_block = current_block.saturating_sub(self.blocks_per_weight_set / 2);
+
+        info!(
+            "No stored last weight set block found, initializing to {} (current: {}, interval: {})",
+            safe_last_block, current_block, self.blocks_per_weight_set
+        );
+
+        // Store this initial value
+        self.storage.set_i64(&key, safe_last_block as i64).await?;
+
+        Ok(safe_last_block)
+    }
+
+    /// Store the last weight set block for persistence across restarts
+    async fn store_last_weight_set_block(&self, block: u64) -> Result<()> {
+        let key = format!("last_weight_set_block:{}", self.config.netuid);
+        self.storage.set_i64(&key, block as i64).await?;
+        debug!("Stored last weight set block: {}", block);
+        Ok(())
     }
 
     /// Get current metagraph from Bittensor network

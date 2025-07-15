@@ -123,6 +123,15 @@ impl WeightAllocationEngine {
             }
         }
 
+        // Debug: Show all weights before validation
+        info!(
+            "Final weights before validation ({} entries):",
+            all_weights.len()
+        );
+        for (i, w) in all_weights.iter().enumerate() {
+            info!("  Weight {}: UID={}, weight={}", i, w.uid, w.weight);
+        }
+
         // Validate final allocation
         self.validate_allocation(&all_weights)?;
 
@@ -376,6 +385,7 @@ mod tests {
             burn_uid: 999,
             gpu_allocations,
             weight_set_interval_blocks: 360,
+            weight_version_key: 0,
         }
     }
 
