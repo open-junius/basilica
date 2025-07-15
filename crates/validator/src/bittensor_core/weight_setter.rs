@@ -139,8 +139,7 @@ impl WeightSetter {
             .await?;
 
         if miners_by_category.is_empty() {
-            warn!("No miners found in any GPU category");
-            return Ok(());
+            warn!("No miners found in any GPU category - proceeding with burn allocation");
         }
 
         info!(
@@ -155,8 +154,7 @@ impl WeightSetter {
             .calculate_weight_distribution(miners_by_category)?;
 
         if weight_distribution.miners_served == 0 {
-            warn!("No miners served by weight allocation");
-            return Ok(());
+            warn!("No miners served by weight allocation - proceeding with burn-only weights");
         }
 
         info!(
@@ -184,15 +182,8 @@ impl WeightSetter {
             );
         }
 
-        // 6. Convert to normalized weights for chain submission
-        let normalized_weights: Vec<NormalizedWeight> = weight_distribution
-            .weights
-            .iter()
-            .map(|w| NormalizedWeight {
-                uid: w.uid,
-                weight: w.weight,
-            })
-            .collect();
+        // 6. Convert to normalized weights for chain submission including burn allocation
+        let normalized_weights = self.build_normalized_weights(&weight_distribution)?;
 
         // 7. Get version key and submit weights
         let version_key = self.get_version_key().await?;
@@ -212,6 +203,38 @@ impl WeightSetter {
             .await?;
 
         Ok(())
+    }
+
+    /// Build normalized weights including both miner weights and burn allocation
+    fn build_normalized_weights(
+        &self,
+        weight_distribution: &crate::bittensor_core::weight_allocation::WeightDistribution,
+    ) -> Result<Vec<NormalizedWeight>> {
+        let mut normalized_weights: Vec<NormalizedWeight> = weight_distribution
+            .weights
+            .iter()
+            .map(|w| NormalizedWeight {
+                uid: w.uid,
+                weight: w.weight,
+            })
+            .collect();
+
+        // Include burn allocation if present
+        if let Some(burn_alloc) = &weight_distribution.burn_allocation {
+            normalized_weights.push(NormalizedWeight {
+                uid: burn_alloc.uid,
+                weight: burn_alloc.weight,
+            });
+        }
+
+        // The weight allocation engine guarantees at least burn allocation exists
+        // so this should never be empty, but assert to be safe
+        assert!(
+            !normalized_weights.is_empty(),
+            "Weight allocation engine produced no weights - this should never happen"
+        );
+
+        Ok(normalized_weights)
     }
 
     /// Update miner GPU profile from validation results
