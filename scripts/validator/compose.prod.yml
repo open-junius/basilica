@@ -9,7 +9,7 @@ services:
     privileged: true
 
     environment:
-      - RUST_LOG=info
+      - RUST_LOG=debug
       - RUST_BACKTRACE=1
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
