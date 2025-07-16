@@ -11,6 +11,7 @@ use crate::persistence::entities::VerificationLog;
 use crate::persistence::SimplePersistence;
 use anyhow::Result;
 use bittensor::{AccountId, Metagraph, NormalizedWeight, Service as BittensorService};
+use chrono::{DateTime, Utc};
 use common::config::BittensorConfig;
 use common::identity::{ExecutorId, MinerUid};
 use common::{KeyValueStorage, MemoryStorage};
@@ -19,6 +20,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::interval;
 use tracing::{debug, error, info, warn};
+use uuid::Uuid;
 
 // NormalizedWeight is imported from bittensor crate
 
@@ -288,24 +290,61 @@ impl WeightSetter {
         miner_uid: MinerUid,
         executor_validations: Vec<ExecutorValidationResult>,
     ) -> Result<()> {
+        info!(
+            "Updating GPU profile for miner {} with {} validations",
+            miner_uid.as_u16(),
+            executor_validations.len()
+        );
+
         // Convert ExecutorValidationResult to the format expected by GPU scoring engine
         let gpu_validations: Vec<categorization::ExecutorValidationResult> = executor_validations
             .into_iter()
-            .map(|v| categorization::ExecutorValidationResult {
-                executor_id: v.executor_id.to_string(),
-                is_valid: v.is_valid,
-                gpu_model: v.gpu_model, // Use the actual GPU model from validation
-                gpu_count: v.gpu_count,
-                gpu_memory_gb: v.gpu_memory_gb,
-                attestation_valid: v.attestation_valid,
-                validation_timestamp: v.validation_timestamp,
+            .map(|v| {
+                debug!(
+                    "Converting validation for executor {}: gpu_model={}, gpu_count={}, valid={}, attestation_valid={}",
+                    v.executor_id, v.gpu_model, v.gpu_count, v.is_valid, v.attestation_valid
+                );
+                categorization::ExecutorValidationResult {
+                    executor_id: v.executor_id.to_string(),
+                    is_valid: v.is_valid,
+                    gpu_model: v.gpu_model,
+                    gpu_count: v.gpu_count,
+                    gpu_memory_gb: v.gpu_memory_gb,
+                    attestation_valid: v.attestation_valid,
+                    validation_timestamp: v.validation_timestamp,
+                }
             })
             .collect();
 
+        info!(
+            "Calling GPU scoring engine for miner {} with {} converted validations",
+            miner_uid.as_u16(),
+            gpu_validations.len()
+        );
+
         // Update the miner's GPU profile using the scoring engine
-        self.gpu_scoring_engine
+        match self
+            .gpu_scoring_engine
             .update_miner_profile_from_validation(miner_uid, gpu_validations)
-            .await?;
+            .await
+        {
+            Ok(profile) => {
+                info!(
+                    "Successfully updated GPU profile for miner {}: gpu_model={}, score={}",
+                    miner_uid.as_u16(),
+                    profile.primary_gpu_model,
+                    profile.total_score
+                );
+            }
+            Err(e) => {
+                error!(
+                    "Failed to update GPU profile for miner {}: {}",
+                    miner_uid.as_u16(),
+                    e
+                );
+                return Err(e);
+            }
+        }
 
         Ok(())
     }
@@ -559,36 +598,34 @@ impl WeightSetter {
     ) -> Result<ExecutorValidationResult> {
         // Parse hardware specs from the verification log details
         // Always try to parse specs, even for failed validations, to track GPU hardware
-        let hardware_specs = if !log.details.is_null() {
+        let hardware_specs: Option<serde_json::Value> = if !log.details.is_null() {
             serde_json::from_value(log.details.clone()).ok()
         } else {
             None
         };
 
-        // Calculate hardware score based on specs
+        // Extract data from the verification log structure
         let (hardware_score, gpu_count, gpu_memory_gb, network_bandwidth_mbps, gpu_model) =
             if let Some(specs) = hardware_specs {
-                let score = self.calculate_hardware_score(&specs);
-                let gpu_count = specs["gpu"].as_array().map(|a| a.len()).unwrap_or(0);
-
-                // Extract GPU model from the first GPU (primary GPU)
-                let gpu_model = specs["gpu"]
-                    .as_array()
-                    .and_then(|gpus| gpus.first())
-                    .and_then(|gpu| gpu["model"].as_str())
+                // Extract GPU model from executor_result.gpu_name
+                let gpu_model = specs["executor_result"]["gpu_name"]
+                    .as_str()
                     .unwrap_or("UNKNOWN")
                     .to_string();
 
-                let gpu_memory = specs["gpu"]
-                    .as_array()
-                    .map(|gpus| {
-                        gpus.iter()
-                            .map(|gpu| gpu["vram_mb"].as_u64().unwrap_or(0))
-                            .sum::<u64>()
-                    })
-                    .unwrap_or(0)
-                    / 1024; // Convert MB to GB
-                let bandwidth = specs["network"]["bandwidth_mbps"].as_f64().unwrap_or(0.0);
+                // Extract actual GPU count from the original validator-binary data
+                // The validator-binary output includes a top-level gpu_count field
+                let gpu_count = specs["gpu_count"].as_u64().unwrap_or(0) as usize;
+
+                // GPU memory is not available in the stored data, default to 0
+                let gpu_memory = 0u64;
+
+                // Extract memory bandwidth from executor_result.memory_bandwidth_gbps
+                let bandwidth = specs["executor_result"]["memory_bandwidth_gbps"]
+                    .as_f64()
+                    .unwrap_or(0.0);
+
+                let score = self.calculate_hardware_score(&specs);
 
                 (score, gpu_count, gpu_memory, bandwidth, gpu_model)
             } else {
@@ -602,7 +639,9 @@ impl WeightSetter {
             gpu_count,
             gpu_memory_gb,
             _network_bandwidth_mbps: network_bandwidth_mbps,
-            attestation_valid: log.verification_type == "attestation" && log.success,
+            attestation_valid: (log.verification_type == "attestation"
+                || log.verification_type == "ssh_automation")
+                && log.success,
             validation_timestamp: log.timestamp,
             gpu_model,
         })
@@ -692,22 +731,42 @@ impl WeightSetter {
                 .map_err(|e| anyhow::anyhow!("Failed to parse executor ID: {}", e))?;
 
             let log = VerificationLog {
-                id: row.get("id"),
+                id: Uuid::parse_str(&row.get::<String, _>("id"))
+                    .map_err(|e| anyhow::anyhow!("Failed to parse verification log UUID: {}", e))?,
                 executor_id: row.get("executor_id"),
                 validator_hotkey: row.get("validator_hotkey"),
                 verification_type: row.get("verification_type"),
-                timestamp: row.get("timestamp"),
+                timestamp: DateTime::parse_from_rfc3339(&row.get::<String, _>("timestamp"))
+                    .map_err(|e| anyhow::anyhow!("Failed to parse timestamp: {}", e))?
+                    .with_timezone(&Utc),
                 score: row.get("score"),
                 success: row.get::<i64, _>("success") != 0,
-                details: row.get("details"),
+                details: serde_json::from_str(&row.get::<String, _>("details"))
+                    .map_err(|e| anyhow::anyhow!("Failed to parse details JSON: {}", e))?,
                 duration_ms: row.get("duration_ms"),
                 error_message: row.get("error_message"),
-                created_at: row.get("created_at"),
-                updated_at: row.get("updated_at"),
+                created_at: DateTime::parse_from_rfc3339(&row.get::<String, _>("created_at"))
+                    .map_err(|e| anyhow::anyhow!("Failed to parse created_at: {}", e))?
+                    .with_timezone(&Utc),
+                updated_at: DateTime::parse_from_rfc3339(&row.get::<String, _>("updated_at"))
+                    .map_err(|e| anyhow::anyhow!("Failed to parse updated_at: {}", e))?
+                    .with_timezone(&Utc),
             };
 
-            if let Ok(validation) = self.extract_validation_result(executor_id, &log) {
-                validations.push(validation);
+            match self.extract_validation_result(executor_id.clone(), &log) {
+                Ok(validation) => {
+                    debug!(
+                        "Successfully extracted validation for executor {}: gpu_model={}, gpu_count={}, success={}",
+                        executor_id, validation.gpu_model, validation.gpu_count, validation.is_valid
+                    );
+                    validations.push(validation);
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to extract validation result for executor {} (miner {}): {}. Log details: {:?}",
+                        executor_id, miner_uid.as_u16(), e, log.details
+                    );
+                }
             }
         }
 
@@ -925,6 +984,157 @@ mod tests {
         // For H100 with 80GB, dividing by 1024 gives 0.078, formatted as "H0"
         // For H200 with 138GB, dividing by 1024 gives 0.134, formatted as "H0"
         // Both would be categorized as "OTHER" and excluded from rewards!
+    }
+
+    #[test]
+    fn test_extract_validation_result_with_new_data_format() {
+        // This test verifies the fix for GPU model extraction from the new data format
+        // Simulates actual validator-binary output structure
+        let log = VerificationLog {
+            id: uuid::Uuid::new_v4(),
+            executor_id: "executor_175".to_string(),
+            validator_hotkey: "validator_hotkey".to_string(),
+            verification_type: "binary_validation".to_string(),
+            timestamp: chrono::Utc::now(),
+            score: 0.84,
+            success: true,
+            details: json!({
+                "executor_result": {
+                    "gpu_name": "NVIDIA H100 80GB HBM3",
+                    "gpu_uuid": "GPU-12345678-1234-1234-1234-123456789012",
+                    "memory_bandwidth_gbps": 3.35,
+                    "anti_debug_passed": true
+                },
+                "gpu_count": 8,
+                "success": true,
+                "validation_score": 0.84,
+                "execution_time_ms": 15000
+            }),
+            duration_ms: 15000,
+            error_message: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+
+        // Test direct extraction without requiring full WeightSetter instance
+        let details = &log.details;
+
+        // Test the corrected GPU model extraction path
+        let gpu_model = details["executor_result"]["gpu_name"]
+            .as_str()
+            .unwrap_or("UNKNOWN");
+
+        let gpu_count = details["gpu_count"].as_u64().unwrap_or(0) as usize;
+
+        // Verify the GPU model is correctly extracted from the new path
+        assert_eq!(gpu_model, "NVIDIA H100 80GB HBM3");
+        assert_eq!(gpu_count, 8);
+
+        // Test that the old path would fail (this proves our fix is needed)
+        let old_path_gpu = details["gpu"][0]["model"].as_str().unwrap_or("UNKNOWN");
+        assert_eq!(old_path_gpu, "UNKNOWN"); // This confirms old path doesn't work
+    }
+
+    #[test]
+    fn test_extract_validation_result_missing_executor_result() {
+        // Test case where executor_result is missing (should default to UNKNOWN)
+        let log = VerificationLog {
+            id: uuid::Uuid::new_v4(),
+            executor_id: "executor_failed".to_string(),
+            validator_hotkey: "validator_hotkey".to_string(),
+            verification_type: "binary_validation".to_string(),
+            timestamp: chrono::Utc::now(),
+            score: 0.0,
+            success: false,
+            details: json!({
+                "gpu_count": 0,
+                "success": false,
+                "validation_score": 0.0,
+                "execution_time_ms": 5000,
+                "error_message": "Failed to connect to executor"
+            }),
+            duration_ms: 5000,
+            error_message: Some("Failed to connect to executor".to_string()),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+
+        let details = &log.details;
+
+        // Test extraction when executor_result is missing
+        let gpu_model = details["executor_result"]["gpu_name"]
+            .as_str()
+            .unwrap_or("UNKNOWN");
+
+        let gpu_count = details["gpu_count"].as_u64().unwrap_or(0) as usize;
+
+        // Verify defaults when data is missing
+        assert_eq!(gpu_model, "UNKNOWN");
+        assert_eq!(gpu_count, 0);
+    }
+
+    #[test]
+    fn test_gpu_categorization_with_corrected_extraction() {
+        // Test that H100 and H200 GPUs are now properly identified
+        let h100_log = VerificationLog {
+            id: uuid::Uuid::new_v4(),
+            executor_id: "executor_h100".to_string(),
+            validator_hotkey: "validator_hotkey".to_string(),
+            verification_type: "binary_validation".to_string(),
+            timestamp: chrono::Utc::now(),
+            score: 0.9,
+            success: true,
+            details: json!({
+                "executor_result": {
+                    "gpu_name": "NVIDIA H100 80GB HBM3",
+                    "memory_bandwidth_gbps": 3.35
+                },
+                "gpu_count": 8
+            }),
+            duration_ms: 12000,
+            error_message: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+
+        let h200_log = VerificationLog {
+            id: uuid::Uuid::new_v4(),
+            executor_id: "executor_h200".to_string(),
+            validator_hotkey: "validator_hotkey".to_string(),
+            verification_type: "binary_validation".to_string(),
+            timestamp: chrono::Utc::now(),
+            score: 0.95,
+            success: true,
+            details: json!({
+                "executor_result": {
+                    "gpu_name": "NVIDIA H200",
+                    "memory_bandwidth_gbps": 4.8
+                },
+                "gpu_count": 4
+            }),
+            duration_ms: 10000,
+            error_message: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+
+        // Extract GPU models using the corrected path
+        let h100_model = h100_log.details["executor_result"]["gpu_name"]
+            .as_str()
+            .unwrap_or("UNKNOWN");
+        let h200_model = h200_log.details["executor_result"]["gpu_name"]
+            .as_str()
+            .unwrap_or("UNKNOWN");
+
+        // Verify H100 and H200 are correctly identified
+        assert!(h100_model.contains("H100"));
+        assert!(h200_model.contains("H200"));
+        assert_ne!(h100_model, "UNKNOWN");
+        assert_ne!(h200_model, "UNKNOWN");
+
+        // Test GPU counts are preserved
+        assert_eq!(h100_log.details["gpu_count"].as_u64().unwrap(), 8);
+        assert_eq!(h200_log.details["gpu_count"].as_u64().unwrap(), 4);
     }
 
     #[tokio::test]

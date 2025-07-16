@@ -5,21 +5,21 @@ run_migrations = true
 
 [server]
 host = "0.0.0.0"
-port = 8081
+port = 8080
 advertised_host = "160.202.129.15"
-advertised_port = 8081
+advertised_port = 8080
 advertised_tls = false
 max_connections = 1000
 request_timeout = { secs = 30 }
 
 [bittensor]
-wallet_name = "test_validator"
+wallet_name = "basilica"
 hotkey_name = "default"
-network = "test"
-netuid = 387
-chain_endpoint = "wss://test.finney.opentensor.ai:443"
+network = "finney"
+netuid = 39
+chain_endpoint = "wss://entrypoint-finney.opentensor.ai:443"
 weight_interval_secs = 300
-axon_port = 8081
+axon_port = 8080
 external_ip = "160.202.129.15"
 
 [verification]
@@ -29,7 +29,7 @@ verification_interval = { secs = 600 }
 challenge_timeout = { secs = 120 }
 retry_attempts = 3
 retry_delay = { secs = 5 }
-netuid = 387
+netuid = 39
 use_dynamic_discovery = true
 discovery_timeout = { secs = 30 }
 fallback_to_static = true

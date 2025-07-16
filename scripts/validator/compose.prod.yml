@@ -15,9 +15,9 @@ services:
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
 
     volumes:
-      - /opt/basilica/config/validator.toml:/app/validator.toml:ro
-      - /opt/basilica/data:/app/data:rw
-      - ~/.ssh:/app/keys:ro
+      - /opt/basilica/config/validator.toml:/opt/basilica/config/validator.toml:ro
+      - /opt/basilica/data:/opt/basilica/data:rw
+      - ~/.ssh:/opt/basilica/keys:ro
       - ~/.bittensor:/root/.bittensor:rw
       - /var/log/basilica:/var/log/basilica:rw
 
@@ -32,7 +32,7 @@ services:
     networks:
       - basilica_network
 
-    command: ["--config", "/app/validator.toml", "start"]
+    command: ["--config", "/opt/basilica/config/validator.toml", "start"]
 
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]

@@ -510,6 +510,7 @@ pub struct ValidatorBinaryOutput {
     pub error_message: Option<String>,
     pub execution_time_ms: u64,
     pub validation_score: f64,
+    pub gpu_count: u64,
 }
 
 /// Enhanced executor verification result

@@ -638,6 +638,7 @@ impl VerificationEngine {
                 "binary_validation_successful": executor_result.binary_validation_successful,
                 "verification_method": "ssh_automation",
                 "executor_result": executor_result.executor_result,
+                "gpu_count": executor_result.gpu_count,
                 "score_details": {
                     "verification_score": executor_result.verification_score,
                     "ssh_score": if executor_result.ssh_connection_successful { 0.5 } else { 0.0 },
@@ -729,6 +730,7 @@ impl VerificationEngine {
                 "binary_validation_successful": executor_result.binary_validation_successful,
                 "verification_method": "ssh_automation",
                 "executor_result": executor_result.executor_result,
+                "gpu_count": executor_result.gpu_count,
                 "score_details": {
                     "verification_score": executor_result.verification_score,
                     "ssh_score": if executor_result.ssh_connection_successful { 0.5 } else { 0.0 },
@@ -1705,6 +1707,7 @@ impl VerificationEngine {
             error_message: validation_result.error_message,
             execution_time_ms: execution_duration.as_millis() as u64,
             validation_score,
+            gpu_count: validation_result.gpu_count,
         })
     }
 
@@ -2139,8 +2142,14 @@ impl VerificationEngine {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
-        info!("[EVAL_FLOW] Converted to ValidatorBinaryOutput - validation_score: {:.3}, has_executor_result: {}",
-              validation_score, executor_result.is_some());
+        // Extract GPU count from the original validator-binary data
+        let gpu_count = raw_json
+            .get("gpu_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+
+        info!("[EVAL_FLOW] Converted to ValidatorBinaryOutput - validation_score: {:.3}, has_executor_result: {}, gpu_count: {}",
+              validation_score, executor_result.is_some(), gpu_count);
 
         Ok(crate::validation::types::ValidatorBinaryOutput {
             success,
@@ -2148,6 +2157,7 @@ impl VerificationEngine {
             error_message,
             execution_time_ms,
             validation_score,
+            gpu_count,
         })
     }
 
@@ -2665,6 +2675,7 @@ impl VerificationEngine {
                     ),
                     execution_time: Duration::from_secs(0),
                     validation_details,
+                    gpu_count: 0,
                 });
             }
 
@@ -2703,6 +2714,7 @@ impl VerificationEngine {
                     error: Some(format!("SSH session establishment failed: {e}")),
                     execution_time: total_start.elapsed(),
                     validation_details,
+                    gpu_count: 0,
                 });
             }
         };
@@ -2738,6 +2750,7 @@ impl VerificationEngine {
         let mut binary_validation_successful = false;
         let mut executor_result = None;
         let mut binary_score = 0.0;
+        let mut gpu_count = 0u64;
 
         info!(
             "[EVAL_FLOW] Binary validation config check for executor {}: ssh_successful={}, enabled={}, validator_binary_path={:?}",
@@ -2758,6 +2771,7 @@ impl VerificationEngine {
                     binary_validation_successful = binary_result.success;
                     executor_result = binary_result.executor_result;
                     binary_score = binary_result.validation_score;
+                    gpu_count = binary_result.gpu_count;
                     validation_details.binary_upload_duration = Duration::from_secs(0); // Upload handled by validator binary
                     validation_details.binary_execution_duration =
                         Duration::from_millis(binary_result.execution_time_ms);
@@ -2821,6 +2835,7 @@ impl VerificationEngine {
             error: None,
             execution_time: total_start.elapsed(),
             validation_details,
+            gpu_count,
         })
     }
 }
@@ -2872,6 +2887,7 @@ pub struct ExecutorVerificationResult {
     pub error: Option<String>,
     pub execution_time: Duration,
     pub validation_details: crate::validation::types::ValidationDetails,
+    pub gpu_count: u64,
 }
 
 /// Verification step tracking

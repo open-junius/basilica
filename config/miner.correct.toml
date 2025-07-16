@@ -1,8 +1,8 @@
 [bittensor]
 wallet_name = "test_miner"
 hotkey_name = "default"
-network = "test"
-netuid = 387
+network = "finney"
+netuid = 39
 weight_interval_secs = 300
 coldkey_name = "default"
 external_ip = "185.216.22.185"
