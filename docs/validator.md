@@ -103,7 +103,7 @@ The easiest way to run a validator in production is using Docker Compose:
 cd scripts/validator
 
 # Copy and customize the production config
-cp ../../config/validator.correct.toml ../../config/validator.toml
+cp ../../config/validator.correct.toml /opt/basilica/config/validator.toml
 # Edit validator.toml with your specific settings:
 # - Update external_ip and advertised_host to your public IP
 # - Set your wallet_name and hotkey_name
@@ -113,6 +113,8 @@ cp ../../config/validator.correct.toml ../../config/validator.toml
 ls ~/.bittensor/wallets/your_validator_wallet/hotkeys/
 
 # Create required directories
+mkdir -p /opt/basilica/config
+mkdir -p /opt/basilica/data
 mkdir -p /var/log/basilica
 
 # Deploy with Docker Compose (includes auto-updates and monitoring)
@@ -124,6 +126,7 @@ docker logs basilica-validator
 ```
 
 This production setup includes:
+
 - **Automatic updates** via Watchtower
 - **Health monitoring** with automatic restarts  
 - **Persistent data storage** with named volumes
@@ -135,11 +138,12 @@ This production setup includes:
 #### Using Build Script and Remote Deployment
 
 ```bash
-# Build and deploy to remote server (see BASILICA-DEPLOYMENT-GUIDE.md)
-./scripts/deploy.sh -s validator -v user@your-server:port
+# Build and deploy to remote server
+./scripts/validator/build.sh
+./scripts/validator/deploy.sh -s user@your-server:port
 
 # Deploy with wallet sync and health checks
-./scripts/deploy.sh -s validator -v user@your-server:port -w -c
+./scripts/validator/deploy.sh -s user@your-server:port -w --health-check
 ```
 
 #### Building from Source
@@ -162,14 +166,14 @@ docker build -f scripts/validator/Dockerfile -t basilica/validator .
 docker run -d \
   --name basilica-validator \
   --restart unless-stopped \
-  -v ~/.bittensor:/home/basilica/.bittensor \
-  -v ./config/validator.toml:/app/validator.toml:ro \
-  -v validator-data:/app/data \
-  -v ~/.ssh:/app/keys:ro \
-  -p 50053:50053 \
-  -p 3000:3000 \
+  -v ~/.bittensor:/root/.bittensor \
+  -v /opt/basilica/config/validator.toml:/opt/basilica/config/validator.toml:ro \
+  -v /opt/basilica/data:/opt/basilica/data \
+  -v ~/.ssh:/opt/basilica/keys:ro \
+  -v /var/log/basilica:/var/log/basilica \
   -p 8080:8080 \
-  basilica/validator:latest --config /app/validator.toml
+  -p 9090:9090 \
+  basilica/validator:latest --config /opt/basilica/config/validator.toml start
 ```
 
 **Important Notes**:
@@ -177,7 +181,7 @@ docker run -d \
 - The validator automatically discovers its UID from the Bittensor metagraph based on its hotkey
 - UIDs are no longer hardcoded in configuration files
 - Chain endpoint is auto-detected based on network type if not explicitly specified
-- Ensure proper firewall configuration for ports 50053 (gRPC), 3000 (API), and 8080 (metrics)
+- Ensure proper firewall configuration for ports 8080 (server/API) and 9090 (metrics)
 - For production, use the compose.prod.yml for automatic updates and monitoring
 
 ## Verification Process

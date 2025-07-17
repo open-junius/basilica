@@ -134,7 +134,7 @@ jobs:
       packages: write
     strategy:
       matrix:
-        service: [executor, miner, validator, public-api]
+        service: [executor, miner, validator]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -149,18 +149,9 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-${{ matrix.service }}
-          tags: |
-            type=ref,event=branch
-            type=ref,event=pr
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
-            type=sha
+      - name: Extract version tag
+        id: version
+        run: echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
 
       # Copy veritas binaries for validator
       - name: Copy veritas binaries
@@ -169,18 +160,17 @@ jobs:
           cp bin/executor-binary/executor-binary ./executor-binary
           cp bin/validator-binary/validator-binary ./validator-binary
 
-      - name: Build and push Docker image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: ./scripts/${{ matrix.service }}/Dockerfile
-          platforms: linux/amd64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          build-args: |
-            BUILD_MODE=release
-            VERSION=${{ needs.create-release.outputs.version }}
-            BITTENSOR_NETWORK=finney
+      - name: Build Docker image
+        env:
+          BITTENSOR_NETWORK: finney
+        run: |
+          ./scripts/${{ matrix.service }}/build.sh \
+            --image-name ghcr.io/tplr-ai/basilica/${{ matrix.service }} \
+            --image-tag ${{ steps.version.outputs.tag }}
+
+      - name: Push Docker image
+        run: |
+          ./scripts/${{ matrix.service }}/push.sh \
+            --source-image ghcr.io/tplr-ai/basilica/${{ matrix.service }} \
+            --target-image ghcr.io/tplr-ai/basilica/${{ matrix.service }} \
+            --tag ${{ steps.version.outputs.tag }}

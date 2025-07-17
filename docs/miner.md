@@ -152,7 +152,7 @@ The easiest way to run a miner in production is using Docker Compose:
 cd scripts/miner
 
 # Copy and customize the production config
-cp ../../config/miner.correct.toml ../../config/miner.toml
+cp ../../config/miner.correct.toml /opt/basilica/config/miner.toml
 # Edit miner.toml with your specific settings:
 # - Update external_ip and advertised_host to your public IP
 # - Set your wallet_name and hotkey_name
@@ -163,6 +163,8 @@ cp ../../config/miner.correct.toml ../../config/miner.toml
 ls ~/.bittensor/wallets/your_miner_wallet/hotkeys/
 
 # Create required directories
+mkdir -p /opt/basilica/config
+mkdir -p /opt/basilica/data
 mkdir -p /var/log/basilica
 
 # Deploy with Docker Compose (includes auto-updates and monitoring)
@@ -174,6 +176,7 @@ docker logs basilica-miner
 ```
 
 This production setup includes:
+
 - **Automatic updates** via Watchtower
 - **Health monitoring** with automatic restarts
 - **Persistent data storage** with named volumes
@@ -185,11 +188,12 @@ This production setup includes:
 #### Using Build Script and Remote Deployment
 
 ```bash
-# Build and deploy to remote server (see BASILICA-DEPLOYMENT-GUIDE.md)
-./scripts/deploy.sh -s miner -m user@your-server:port
+# Build and deploy to remote server
+./scripts/miner/build.sh
+./scripts/miner/deploy.sh -s user@your-server:port
 
 # Deploy with wallet sync and health checks
-./scripts/deploy.sh -s miner -m user@your-server:port -w -c
+./scripts/miner/deploy.sh -s user@your-server:port -w --health-check
 ```
 
 #### Building from Source
@@ -215,13 +219,14 @@ docker build -f scripts/miner/Dockerfile -t basilica/miner .
 docker run -d \
   --name basilica-miner \
   --restart unless-stopped \
-  -v ~/.bittensor:/home/basilica/.bittensor \
-  -v ./config/miner.toml:/app/miner.toml:ro \
-  -v miner-data:/app/data \
-  -p 50051:50051 \
-  -p 8091:8091 \
+  -v ~/.bittensor:/root/.bittensor \
+  -v /opt/basilica/config/miner.toml:/opt/basilica/config/miner.toml:ro \
+  -v /opt/basilica/data:/opt/basilica/data \
+  -v ~/.ssh:/opt/basilica/keys:ro \
+  -v /var/log/basilica:/var/log/basilica \
   -p 8080:8080 \
-  basilica/miner:latest --config /app/miner.toml
+  -p 9090:9090 \
+  basilica/miner:latest --config /opt/basilica/config/miner.toml
 ```
 
 **Important Notes**:
@@ -229,7 +234,7 @@ docker run -d \
 - The miner automatically discovers its UID from the Bittensor metagraph based on its hotkey
 - UIDs are no longer hardcoded in configuration files
 - Chain endpoint is auto-detected based on network type if not explicitly specified
-- Ensure proper firewall configuration for ports 50051 (gRPC), 8091 (Axon), and 8080 (metrics)
+- Ensure proper firewall configuration for ports 8080 (server/API) and 9090 (metrics)
 - For production, use the compose.prod.yml for automatic updates and monitoring
 - You must have at least one executor configured and accessible
 

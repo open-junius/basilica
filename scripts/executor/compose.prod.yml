@@ -9,29 +9,35 @@ services:
     privileged: true
 
     environment:
-      - RUST_LOG=info
+      - RUST_LOG=debug
       - RUST_BACKTRACE=1
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
 
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - ../../config/executor.toml:/app/executor.toml:ro
-      - executor-data:/app/data
-      - /dev:/dev:rw
+      - /opt/basilica/config/executor.toml:/opt/basilica/config/executor.toml:ro
+      - /opt/basilica/data:/opt/basilica/data:rw
+      - ~/.ssh:/opt/basilica/keys:ro
+      - /var/log/basilica:/var/log/basilica:rw
 
     ports:
-      - "50052:50052"   # gRPC server
-      - "8080:8080"     # Metrics
-      - "22222:22"      # SSH for validator
+      - "50051:50051"   # gRPC server (from config server.port)
+      - "50052:50052"   # Health port (from config health.port)
+      - "9090:9090"     # Metrics port (from config metrics.prometheus.port)
+      - "22:22"         # SSH for validator (from config validator.ssh_port)
+
+    dns:
+      - 1.1.1.1
+      - 1.0.0.1
 
     networks:
       - basilica_network
 
-    command: ["--config", "/app/executor.toml"]
+    command: ["--server", "--config", "/opt/basilica/config/executor.toml"]
 
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:50052/health"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -53,13 +59,13 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
       - WATCHTOWER_CLEANUP=true
-      - WATCHTOWER_POLL_INTERVAL=300
+      - WATCHTOWER_POLL_INTERVAL=60
       - WATCHTOWER_LABEL_ENABLE=true
-    command: --label-enable --cleanup --interval 300
+    dns:
+      - 1.1.1.1
+      - 1.0.0.1
+    command: --label-enable --cleanup --interval 60
 
 networks:
   basilica_network:
     driver: bridge
-
-volumes:
-  executor-data:
