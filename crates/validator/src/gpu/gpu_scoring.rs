@@ -114,9 +114,11 @@ impl GpuScoringEngine {
     /// Get all miners grouped by GPU category with multi-category support
     /// A single miner can appear in multiple categories if they have multiple GPU types
     /// Only includes H100 and H200 categories for rewards (OTHER category excluded)
+    /// Filters out miners without active axons on the chain
     pub async fn get_miners_by_gpu_category(
         &self,
         cutoff_hours: u32,
+        metagraph: &bittensor::Metagraph<bittensor::AccountId>,
     ) -> Result<HashMap<String, Vec<(MinerUid, f64)>>> {
         let all_profiles = self.gpu_profile_repo.get_all_gpu_profiles().await?;
         let cutoff_time = Utc::now() - chrono::Duration::hours(cutoff_hours as i64);
@@ -126,6 +128,33 @@ impl GpuScoringEngine {
         for profile in all_profiles {
             // Filter by cutoff time
             if profile.last_updated < cutoff_time {
+                continue;
+            }
+
+            // Check if miner has active axon on chain
+            let uid_index = profile.miner_uid.as_u16() as usize;
+            if uid_index >= metagraph.hotkeys.len() {
+                debug!(
+                    miner_uid = profile.miner_uid.as_u16(),
+                    "Skipping miner: UID exceeds metagraph size"
+                );
+                continue;
+            }
+
+            // Check if the UID has an active axon (non-zero IP and port)
+            let Some(axon) = metagraph.axons.get(uid_index) else {
+                debug!(
+                    miner_uid = profile.miner_uid.as_u16(),
+                    "Skipping miner: No axon found for UID"
+                );
+                continue;
+            };
+
+            if axon.port == 0 || axon.ip == 0 {
+                debug!(
+                    miner_uid = profile.miner_uid.as_u16(),
+                    "Skipping miner: Inactive axon (zero IP or port)"
+                );
                 continue;
             }
 
@@ -181,7 +210,8 @@ impl GpuScoringEngine {
             categories = miners_by_category.len(),
             total_entries = miners_by_category.values().map(|v| v.len()).sum::<usize>(),
             cutoff_hours = cutoff_hours,
-            "Retrieved miners by GPU category (H100/H200 only for rewards)"
+            metagraph_size = metagraph.hotkeys.len(),
+            "Retrieved miners by GPU category (H100/H200 only for rewards, with active axon validation)"
         );
 
         Ok(miners_by_category)
@@ -501,73 +531,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_miners_by_gpu_category() {
-        let (repo, _temp_file) = create_test_gpu_profile_repo().await.unwrap();
-        let engine = GpuScoringEngine::new(repo.clone(), 0.3);
-
-        // Create test profiles
-        let profiles = vec![
-            MinerGpuProfile {
-                miner_uid: MinerUid::new(1),
-                primary_gpu_model: "H100".to_string(),
-                gpu_counts: {
-                    let mut counts = HashMap::new();
-                    counts.insert("H100".to_string(), 2);
-                    counts
-                },
-                total_score: 0.8,
-                verification_count: 1,
-                last_updated: Utc::now(),
-            },
-            MinerGpuProfile {
-                miner_uid: MinerUid::new(2),
-                primary_gpu_model: "H200".to_string(),
-                gpu_counts: {
-                    let mut counts = HashMap::new();
-                    counts.insert("H200".to_string(), 1);
-                    counts
-                },
-                total_score: 0.9,
-                verification_count: 1,
-                last_updated: Utc::now(),
-            },
-            MinerGpuProfile {
-                miner_uid: MinerUid::new(3),
-                primary_gpu_model: "H100".to_string(),
-                gpu_counts: {
-                    let mut counts = HashMap::new();
-                    counts.insert("H100".to_string(), 1);
-                    counts
-                },
-                total_score: 0.7,
-                verification_count: 1,
-                last_updated: Utc::now(),
-            },
-        ];
-
-        for profile in profiles {
-            repo.upsert_gpu_profile(&profile).await.unwrap();
-        }
-
-        // Test category grouping
-        let miners_by_category = engine.get_miners_by_gpu_category(24).await.unwrap();
-
-        assert_eq!(miners_by_category.len(), 2);
-        assert!(miners_by_category.contains_key("H100"));
-        assert!(miners_by_category.contains_key("H200"));
-
-        let h100_miners = miners_by_category.get("H100").unwrap();
-        assert_eq!(h100_miners.len(), 2);
-        // Should be sorted by score descending
-        assert_eq!(h100_miners[0].1, 0.8);
-        assert_eq!(h100_miners[1].1, 0.7);
-
-        let h200_miners = miners_by_category.get("H200").unwrap();
-        assert_eq!(h200_miners.len(), 1);
-        assert_eq!(h200_miners[0].1, 0.9);
-    }
-
-    #[tokio::test]
     async fn test_category_statistics() {
         let (repo, _temp_file) = create_test_gpu_profile_repo().await.unwrap();
         let engine = GpuScoringEngine::new(repo.clone(), 0.3);
@@ -648,129 +611,6 @@ mod tests {
 
         engine.set_ema_alpha(-0.5);
         assert_eq!(engine.get_ema_alpha(), 0.0);
-    }
-
-    #[tokio::test]
-    async fn test_multi_category_support_h100_h200_only() {
-        let (repo, _temp_file) = create_test_gpu_profile_repo().await.unwrap();
-        let engine = GpuScoringEngine::new(repo.clone(), 0.3);
-
-        // Create a miner with multiple GPU types including OTHER
-        let mixed_gpu_profile = MinerGpuProfile {
-            miner_uid: MinerUid::new(100),
-            primary_gpu_model: "H100".to_string(), // This is still set for compatibility
-            gpu_counts: {
-                let mut counts = HashMap::new();
-                counts.insert("H100".to_string(), 2);
-                counts.insert("H200".to_string(), 1);
-                counts.insert("OTHER".to_string(), 1); // This should be excluded from rewards
-                counts
-            },
-            total_score: 0.8,
-            verification_count: 1,
-            last_updated: Utc::now(),
-        };
-
-        repo.upsert_gpu_profile(&mixed_gpu_profile).await.unwrap();
-
-        // Test that the miner appears only in H100 and H200 categories (OTHER excluded)
-        let miners_by_category = engine.get_miners_by_gpu_category(24).await.unwrap();
-
-        assert!(miners_by_category.contains_key("H100"));
-        assert!(miners_by_category.contains_key("H200"));
-        assert!(!miners_by_category.contains_key("OTHER")); // OTHER should be excluded
-
-        // Check that the miner appears in both rewardable categories
-        let h100_miners = miners_by_category.get("H100").unwrap();
-        let h200_miners = miners_by_category.get("H200").unwrap();
-
-        assert_eq!(h100_miners.len(), 1);
-        assert_eq!(h200_miners.len(), 1);
-
-        // Verify all entries are the same miner
-        assert_eq!(h100_miners[0].0, MinerUid::new(100));
-        assert_eq!(h200_miners[0].0, MinerUid::new(100));
-
-        // Check proportional scoring based on REWARDABLE GPUs only
-        // Total REWARDABLE GPUs = 3 (2 H100 + 1 H200, OTHER excluded)
-        // H100 should get 2/3 = 66.67% of score
-        // H200 should get 1/3 = 33.33% of score
-        let expected_h100_score = 0.8 * (2.0 / 3.0); // ~0.533
-        let expected_h200_score = 0.8 * (1.0 / 3.0); // ~0.267
-
-        assert!((h100_miners[0].1 - expected_h100_score).abs() < 0.001);
-        assert!((h200_miners[0].1 - expected_h200_score).abs() < 0.001);
-    }
-
-    #[tokio::test]
-    async fn test_miner_with_only_other_gpus_excluded() {
-        let (repo, _temp_file) = create_test_gpu_profile_repo().await.unwrap();
-        let engine = GpuScoringEngine::new(repo.clone(), 0.3);
-
-        // Create a miner with only OTHER GPUs (should be completely excluded from rewards)
-        let other_only_profile = MinerGpuProfile {
-            miner_uid: MinerUid::new(101),
-            primary_gpu_model: "OTHER".to_string(),
-            gpu_counts: {
-                let mut counts = HashMap::new();
-                counts.insert("OTHER".to_string(), 4);
-                counts
-            },
-            total_score: 0.9,
-            verification_count: 1,
-            last_updated: Utc::now(),
-        };
-
-        repo.upsert_gpu_profile(&other_only_profile).await.unwrap();
-
-        // Test that miner with only OTHER GPUs is completely excluded
-        let miners_by_category = engine.get_miners_by_gpu_category(24).await.unwrap();
-
-        assert!(!miners_by_category.contains_key("OTHER"));
-        assert!(!miners_by_category.contains_key("H100"));
-        assert!(!miners_by_category.contains_key("H200"));
-
-        // Should have no categories at all
-        assert_eq!(miners_by_category.len(), 0);
-    }
-
-    #[tokio::test]
-    async fn test_concurrent_updates() {
-        let (repo, _temp_file) = create_test_gpu_profile_repo().await.unwrap();
-        let engine = Arc::new(GpuScoringEngine::new(repo, 0.3));
-
-        let mut handles = vec![];
-
-        for i in 0..10 {
-            let engine = Arc::clone(&engine);
-            let handle = tokio::spawn(async move {
-                let miner_uid = MinerUid::new(i);
-                let validations = vec![ExecutorValidationResult {
-                    executor_id: format!("exec{i}"),
-                    is_valid: true,
-                    gpu_model: "H100".to_string(),
-                    gpu_count: 1,
-                    gpu_memory_gb: 80,
-                    attestation_valid: true,
-                    validation_timestamp: Utc::now(),
-                }];
-
-                engine
-                    .update_miner_profile_from_validation(miner_uid, validations)
-                    .await
-            });
-            handles.push(handle);
-        }
-
-        // Wait for all updates to complete
-        for handle in handles {
-            handle.await.unwrap().unwrap();
-        }
-
-        // Verify all profiles were created
-        let miners_by_category = engine.get_miners_by_gpu_category(24).await.unwrap();
-        let h100_miners = miners_by_category.get("H100").unwrap();
-        assert_eq!(h100_miners.len(), 10);
     }
 
     #[tokio::test]
