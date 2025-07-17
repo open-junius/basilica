@@ -64,6 +64,26 @@ services:
       - 1.0.0.1
     command: --label-enable --cleanup --interval 60
 
+  alloy:
+    image: grafana/alloy:latest
+    container_name: basilica-alloy
+    restart: unless-stopped
+    volumes:
+      - ./telemetry/alloy.yml:/etc/alloy/config.alloy:ro
+      - /var/log/basilica:/var/log/basilica:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      - ALLOY_CONFIG_FILE=/etc/alloy/config.alloy
+    ports:
+      - "12345:12345"
+    networks:
+      - basilica_network
+    depends_on:
+      - validator
+    dns:
+      - 1.1.1.1
+      - 1.0.0.1
+
 networks:
   basilica_network:
     driver: bridge
