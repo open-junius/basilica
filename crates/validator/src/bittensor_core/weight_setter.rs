@@ -24,6 +24,9 @@ use uuid::Uuid;
 
 // NormalizedWeight is imported from bittensor crate
 
+/// Cutoff time in hours for filtering miners by GPU category
+const GPU_CATEGORY_CUTOFF_HOURS: u32 = 3;
+
 /// Executor validation result for scoring
 #[derive(Debug, Clone)]
 pub struct ExecutorValidationResult {
@@ -155,10 +158,14 @@ impl WeightSetter {
             metagraph.hotkeys.len()
         );
 
-        // 2. Get miners by GPU category from the scoring engine
+        // 2. Get miners by GPU category from the scoring engine with axon validation
+        info!(
+            "Fetching miners by GPU category from scoring engine, cutoff at {GPU_CATEGORY_CUTOFF_HOURS} hours"
+
+        );
         let miners_by_category = self
             .gpu_scoring_engine
-            .get_miners_by_gpu_category(24)
+            .get_miners_by_gpu_category(GPU_CATEGORY_CUTOFF_HOURS, &metagraph)
             .await?;
 
         if miners_by_category.is_empty() {
@@ -791,7 +798,8 @@ impl WeightSetter {
             WHERE vl.timestamp >= ?
         "#;
 
-        let cutoff_time = chrono::Utc::now() - chrono::Duration::hours(24);
+        let cutoff_time =
+            chrono::Utc::now() - chrono::Duration::hours(GPU_CATEGORY_CUTOFF_HOURS as i64);
         let rows = sqlx::query(query)
             .bind(cutoff_time.to_rfc3339())
             .fetch_all(self.persistence.pool())
@@ -804,7 +812,10 @@ impl WeightSetter {
                 if let Ok(uid) = uid_str.parse::<u16>() {
                     let miner_uid = MinerUid::new(uid);
 
-                    match self.get_recent_miner_validations(miner_uid, 24).await {
+                    match self
+                        .get_recent_miner_validations(miner_uid, GPU_CATEGORY_CUTOFF_HOURS)
+                        .await
+                    {
                         Ok(validations) if !validations.is_empty() => {
                             if let Err(e) =
                                 self.update_miner_gpu_profile(miner_uid, validations).await
