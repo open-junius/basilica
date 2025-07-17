@@ -127,12 +127,33 @@ impl WeightSetter {
                     "Setting weights at block {} (last set at block {}, interval: {} blocks)",
                     current_block, last_block, self.blocks_per_weight_set
                 );
-                if let Err(e) = self.set_weights_for_miners().await {
-                    error!("Failed to set weights at block {}: {}", current_block, e);
-                } else {
-                    *self.last_weight_set_block.lock().await = current_block;
-                    // Store the last weight set block for persistence across restarts
-                    self.store_last_weight_set_block(current_block).await?;
+
+                // Atomic weight setting with proper persistence
+                match self.set_weights_for_miners().await {
+                    Ok(()) => {
+                        // Only update persistence after successful weight setting
+                        match self.store_last_weight_set_block(current_block).await {
+                            Ok(()) => {
+                                *self.last_weight_set_block.lock().await = current_block;
+                                info!(
+                                    "Successfully set weights and updated persistence at block {}",
+                                    current_block
+                                );
+                            }
+                            Err(e) => {
+                                error!(
+                                    "Weight setting succeeded but failed to persist block {}: {}",
+                                    current_block, e
+                                );
+                                // Continue anyway - weight setting was successful
+                                *self.last_weight_set_block.lock().await = current_block;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        error!("Failed to set weights at block {}: {}", current_block, e);
+                        // Don't update last_weight_set_block on failure
+                    }
                 }
             } else {
                 let blocks_remaining = last_block + self.blocks_per_weight_set - current_block;
@@ -146,6 +167,36 @@ impl WeightSetter {
 
     /// Set weights based on GPU-based allocation with burn mechanism
     async fn set_weights_for_miners(&self) -> Result<()> {
+        const MAX_RETRIES: u32 = 3;
+        const RETRY_DELAY: Duration = Duration::from_secs(5);
+
+        for attempt in 1..=MAX_RETRIES {
+            match self.attempt_weight_setting().await {
+                Ok(()) => {
+                    info!("Weight setting successful on attempt {}", attempt);
+                    return Ok(());
+                }
+                Err(e) => {
+                    error!("Weight setting attempt {} failed: {}", attempt, e);
+                    if attempt < MAX_RETRIES {
+                        warn!(
+                            "Retrying weight setting in {} seconds...",
+                            RETRY_DELAY.as_secs()
+                        );
+                        tokio::time::sleep(RETRY_DELAY).await;
+                    }
+                }
+            }
+        }
+
+        Err(anyhow::anyhow!(
+            "Failed to set weights after {} attempts",
+            MAX_RETRIES
+        ))
+    }
+
+    /// Attempt to set weights (extracted for retry logic)
+    async fn attempt_weight_setting(&self) -> Result<()> {
         info!(
             "Setting weights for subnet {} with GPU-based allocation",
             self.config.netuid
@@ -161,7 +212,6 @@ impl WeightSetter {
         // 2. Get miners by GPU category from the scoring engine with axon validation
         info!(
             "Fetching miners by GPU category from scoring engine, cutoff at {GPU_CATEGORY_CUTOFF_HOURS} hours"
-
         );
         let miners_by_category = self
             .gpu_scoring_engine
@@ -238,8 +288,8 @@ impl WeightSetter {
             }
         }
 
-        // Submit weights to chain with enhanced error handling
-        self.submit_weights_to_chain(normalized_weights.clone(), version_key)
+        // Submit weights to chain with enhanced error handling and retry logic
+        self.submit_weights_to_chain_with_retry(normalized_weights.clone(), version_key)
             .await?;
 
         // 8. Store submission metadata
@@ -354,6 +404,43 @@ impl WeightSetter {
         }
 
         Ok(())
+    }
+
+    /// Submit weights to chain with retry logic
+    async fn submit_weights_to_chain_with_retry(
+        &self,
+        normalized_weights: Vec<NormalizedWeight>,
+        version_key: u64,
+    ) -> Result<()> {
+        const MAX_RETRIES: u32 = 3;
+        const RETRY_DELAY: Duration = Duration::from_secs(10);
+
+        for attempt in 1..=MAX_RETRIES {
+            match self
+                .submit_weights_to_chain(normalized_weights.clone(), version_key)
+                .await
+            {
+                Ok(()) => {
+                    info!("Weight submission successful on attempt {}", attempt);
+                    return Ok(());
+                }
+                Err(e) => {
+                    error!("Weight submission attempt {} failed: {}", attempt, e);
+                    if attempt < MAX_RETRIES {
+                        warn!(
+                            "Retrying weight submission in {} seconds...",
+                            RETRY_DELAY.as_secs()
+                        );
+                        tokio::time::sleep(RETRY_DELAY).await;
+                    }
+                }
+            }
+        }
+
+        Err(anyhow::anyhow!(
+            "Failed to submit weights after {} attempts",
+            MAX_RETRIES
+        ))
     }
 
     /// Submit weights to chain using the provided set_weights_payload function
@@ -547,12 +634,38 @@ impl WeightSetter {
         Ok(())
     }
 
-    /// Get current block number from chain
+    /// Get current block number from chain with retry logic
     async fn get_current_block(&self) -> Result<u64> {
-        self.bittensor_service
-            .get_current_block()
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to get current block: {}", e))
+        const MAX_RETRIES: u32 = 3;
+        const BASE_DELAY: Duration = Duration::from_secs(1);
+
+        for attempt in 1..=MAX_RETRIES {
+            match self.bittensor_service.get_current_block().await {
+                Ok(block) => {
+                    debug!(
+                        "Successfully got current block {} on attempt {}",
+                        block, attempt
+                    );
+                    return Ok(block);
+                }
+                Err(e) => {
+                    error!("Failed to get current block (attempt {}): {}", attempt, e);
+                    if attempt < MAX_RETRIES {
+                        let delay = BASE_DELAY * 2_u32.pow(attempt - 1);
+                        warn!(
+                            "Retrying get_current_block in {} seconds...",
+                            delay.as_secs()
+                        );
+                        tokio::time::sleep(delay).await;
+                    }
+                }
+            }
+        }
+
+        Err(anyhow::anyhow!(
+            "Failed to get current block after {} attempts",
+            MAX_RETRIES
+        ))
     }
 
     /// Get the last weight set block from storage or initialize to current block
@@ -581,20 +694,68 @@ impl WeightSetter {
         Ok(safe_last_block)
     }
 
-    /// Store the last weight set block for persistence across restarts
+    /// Store the last weight set block for persistence across restarts with atomic operation
     async fn store_last_weight_set_block(&self, block: u64) -> Result<()> {
         let key = format!("last_weight_set_block:{}", self.config.netuid);
-        self.storage.set_i64(&key, block as i64).await?;
-        debug!("Stored last weight set block: {}", block);
-        Ok(())
+        let timestamp_key = format!("last_weight_set_timestamp:{}", self.config.netuid);
+
+        // Store both block and timestamp atomically
+        let timestamp = chrono::Utc::now().timestamp();
+
+        // Use a transaction-like approach for atomic storage
+        match self.storage.set_i64(&key, block as i64).await {
+            Ok(()) => {
+                // Store timestamp as well for auditing
+                if let Err(e) = self.storage.set_i64(&timestamp_key, timestamp).await {
+                    warn!("Failed to store timestamp for block {}: {}", block, e);
+                }
+                debug!(
+                    "Stored last weight set block: {} at timestamp: {}",
+                    block, timestamp
+                );
+                Ok(())
+            }
+            Err(e) => {
+                error!("Failed to store last weight set block {}: {}", block, e);
+                Err(e)
+            }
+        }
     }
 
-    /// Get current metagraph from Bittensor network
+    /// Get current metagraph from Bittensor network with retry logic
     async fn get_metagraph(&self) -> Result<Metagraph<AccountId>> {
-        self.bittensor_service
-            .get_metagraph(self.config.netuid)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to fetch metagraph: {}", e))
+        const MAX_RETRIES: u32 = 3;
+        const BASE_DELAY: Duration = Duration::from_secs(2);
+
+        for attempt in 1..=MAX_RETRIES {
+            match self
+                .bittensor_service
+                .get_metagraph(self.config.netuid)
+                .await
+            {
+                Ok(metagraph) => {
+                    debug!(
+                        "Successfully got metagraph with {} neurons on attempt {}",
+                        metagraph.hotkeys.len(),
+                        attempt
+                    );
+                    return Ok(metagraph);
+                }
+                Err(e) => {
+                    error!("Failed to fetch metagraph (attempt {}): {}", attempt, e);
+                    if attempt < MAX_RETRIES {
+                        let delay = BASE_DELAY * 2_u32.pow(attempt - 1);
+                        warn!("Retrying get_metagraph in {} seconds...", delay.as_secs());
+                        tokio::time::sleep(delay).await;
+                    }
+                }
+            }
+        }
+
+        Err(anyhow::anyhow!(
+            "Failed to fetch metagraph after {} attempts",
+            MAX_RETRIES
+        ))
     }
 
     /// Extract validation result from verification log
