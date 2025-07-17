@@ -23,6 +23,7 @@ The executor component is the workhouse of the Basilica network, providing:
 ## Hardware Requirements
 
 ### Minimum Specifications
+
 - **GPU**: NVIDIA GPU with 8GB+ VRAM
 - **CPU**: 4+ cores
 - **RAM**: 16GB+
@@ -30,6 +31,7 @@ The executor component is the workhouse of the Basilica network, providing:
 - **Network**: 1Gbps connection
 
 ### Recommended Specifications
+
 - **GPU**: NVIDIA H100/A100 with 40GB+ VRAM
 - **CPU**: 16+ cores
 - **RAM**: 64GB+
@@ -106,13 +108,15 @@ The recommended way to run an executor in production is using Docker Compose:
 cd scripts/executor
 
 # Copy and customize the production config
-cp ../../config/executor.correct.toml ../../config/executor.toml
+cp ../../config/executor.correct.toml /opt/basilica/config/executor.toml
 # Edit executor.toml with your specific settings:
 # - Update advertised_host to your public IP
 # - Set managing_miner_hotkey to your miner's hotkey
 # - Configure resource limits based on your hardware
 
 # Create required directories
+mkdir -p /opt/basilica/config
+mkdir -p /opt/basilica/data
 mkdir -p /var/log/basilica
 
 # Deploy with Docker Compose (includes auto-updates and monitoring)
@@ -124,23 +128,25 @@ docker logs basilica-executor
 ```
 
 This production setup includes:
+
 - **Automatic updates** via Watchtower
 - **GPU access** with full device passthrough
 - **Privileged container** for Docker-in-Docker operations
 - **Health monitoring** with automatic restarts
 - **Persistent data storage** with named volumes
-- **SSH access** on port 22222 for validators
+- **SSH access** on port 22 for validators
 
 ### 4. Alternative Deployment Methods
 
 #### Using Build Script and Remote Deployment
 
 ```bash
-# Build and deploy to remote server (see BASILICA-DEPLOYMENT-GUIDE.md)
-./scripts/deploy.sh -s executor -e user@your-server:port
+# Build and deploy to remote server
+./scripts/executor/build.sh
+./scripts/executor/deploy.sh -s user@your-server:port
 
 # Deploy with health checks
-./scripts/deploy.sh -s executor -e user@your-server:port -c
+./scripts/executor/deploy.sh -s user@your-server:port --health-check
 ```
 
 #### Building from Source
@@ -165,21 +171,23 @@ docker run -d \
   --restart unless-stopped \
   --privileged \
   -v /var/run/docker.sock:/var/run/docker.sock \
-  -v ./config/executor.toml:/app/executor.toml:ro \
-  -v executor-data:/app/data \
-  -v /dev:/dev:rw \
+  -v /opt/basilica/config/executor.toml:/opt/basilica/config/executor.toml:ro \
+  -v /opt/basilica/data:/opt/basilica/data \
+  -v ~/.ssh:/opt/basilica/keys:ro \
+  -v /var/log/basilica:/var/log/basilica \
   -e NVIDIA_VISIBLE_DEVICES=all \
   -e NVIDIA_DRIVER_CAPABILITIES=compute,utility \
+  -p 50051:50051 \
   -p 50052:50052 \
-  -p 8080:8080 \
-  -p 22222:22 \
-  basilica/executor:latest --config /app/executor.toml
+  -p 9090:9090 \
+  -p 22:22 \
+  basilica/executor:latest --server --config /opt/basilica/config/executor.toml
 ```
 
 **Important Notes**:
 
 - Executor must run in **privileged mode** for container management and GPU access
-- Ensure proper firewall configuration for ports 50052 (gRPC), 8080 (metrics), and 22222 (SSH)
+- Ensure proper firewall configuration for ports 50051 (gRPC), 50052 (health), 9090 (metrics), and 22 (SSH)
 - For production, use the compose.prod.yml for automatic updates and monitoring
 - GPU drivers and Docker GPU runtime must be properly configured
 
@@ -250,13 +258,13 @@ Monitor executor health:
 
 ```bash
 # Check executor health
-curl http://localhost:8080/health
+curl http://localhost:50052/health
 
 # Check gRPC server status
-grpcurl -plaintext localhost:50052 health.v1.Health/Check
+grpcurl -plaintext localhost:50051 health.v1.Health/Check
 
 # View system metrics
-curl http://localhost:8080/metrics
+curl http://localhost:9090/metrics
 ```
 
 ### GPU Monitoring
@@ -286,7 +294,7 @@ docker logs basilica-executor -f
 tail -f /var/log/basilica/executor.log
 
 # Debug mode
-docker run --rm -it basilica/executor --config /app/executor.toml --log-level debug
+docker run --rm -it basilica/executor --server --config /opt/basilica/config/executor.toml --log-level debug
 ```
 
 ## Verification Process
@@ -349,7 +357,7 @@ Error: SSH connection refused
 
 - Ensure SSH server is running: `sudo systemctl status sshd`
 - Check firewall rules: `sudo ufw status`
-- Verify SSH port mapping in Docker: `-p 22222:22`
+- Verify SSH port mapping in Docker: `-p 22:22`
 - Check SSH keys and authorized_keys
 
 **GPU PoW Challenge Failed**
@@ -400,7 +408,7 @@ max_connections = 2000  # Increase for more concurrent validators
 
 ### Network Security
 
-- **Firewall**: Only expose required ports (50052, 8080, 22222)
+- **Firewall**: Only expose required ports (50051, 50052, 9090, 22)
 - **SSH**: Use key-based authentication, disable password auth
 - **VPN**: Consider VPN access for additional security
 - **Rate Limiting**: Configure rate limits for validator requests

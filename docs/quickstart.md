@@ -35,14 +35,15 @@ This is the fastest way to get started with production-ready deployment.
 cd scripts/validator
 
 # 2. Prepare configuration
-cp ../../config/validator.correct.toml ../../config/validator.toml
-# Edit config/validator.toml with your settings:
+cp ../../config/validator.correct.toml /opt/basilica/config/validator.toml
+# Edit /opt/basilica/config/validator.toml with your settings:
 # - wallet_name and hotkey_name
 # - external_ip (your public IP)
 # - network ("finney" for mainnet, "test" for testnet)
 
-# 3. Ensure wallet exists
+# 3. Ensure wallet exists and create directories
 ls ~/.bittensor/wallets/your_wallet/hotkeys/
+mkdir -p /opt/basilica/config /opt/basilica/data /var/log/basilica
 
 # 4. Deploy with auto-updates and monitoring
 docker compose -f compose.prod.yml up -d
@@ -58,14 +59,15 @@ docker logs basilica-validator
 cd scripts/miner
 
 # 2. Prepare configuration
-cp ../../config/miner.correct.toml ../../config/miner.toml
-# Edit config/miner.toml with your settings:
+cp ../../config/miner.correct.toml /opt/basilica/config/miner.toml
+# Edit /opt/basilica/config/miner.toml with your settings:
 # - wallet_name and hotkey_name
 # - external_ip (your public IP)
 # - executor fleet configuration
 # - network ("finney" for mainnet, "test" for testnet)
 
-# 3. Deploy with auto-updates and monitoring
+# 3. Create directories and deploy
+mkdir -p /opt/basilica/config /opt/basilica/data /var/log/basilica
 docker compose -f compose.prod.yml up -d
 
 # 4. Check status
@@ -79,12 +81,13 @@ docker logs basilica-miner
 cd scripts/executor
 
 # 2. Prepare configuration
-cp ../../config/executor.correct.toml ../../config/executor.toml
-# Edit config/executor.toml with your settings:
+cp ../../config/executor.correct.toml /opt/basilica/config/executor.toml
+# Edit /opt/basilica/config/executor.toml with your settings:
 # - managing_miner_hotkey (your miner's hotkey)
 # - advertised_host (your public IP)
 
-# 3. Deploy with GPU access and auto-updates
+# 3. Create directories and deploy with GPU access
+mkdir -p /opt/basilica/config /opt/basilica/data /var/log/basilica
 docker compose -f compose.prod.yml up -d
 
 # 4. Check status
@@ -96,15 +99,10 @@ docker logs basilica-executor
 Deploy to remote servers using the automated deployment script:
 
 ```bash
-# Deploy all services to different servers
-./scripts/deploy.sh -s all \
-  -v user@validator-server:port \
-  -m user@miner-server:port \
-  -e user@executor-server:port \
-  -w -c
-
-# Or deploy individual services
-./scripts/deploy.sh -s validator -v user@server:port -w
+# Deploy individual services to remote servers
+./scripts/validator/deploy.sh -s user@validator-server:port -w --health-check
+./scripts/miner/deploy.sh -s user@miner-server:port -w --health-check
+./scripts/executor/deploy.sh -s user@executor-server:port --health-check
 ```
 
 See [BASILICA-DEPLOYMENT-GUIDE.md](../BASILICA-DEPLOYMENT-GUIDE.md) for detailed deployment instructions.
@@ -126,9 +124,9 @@ cp config/executor.correct.toml config/executor.toml
 # Edit configurations as needed
 
 # 3. Run services
-./validator --config config/validator.toml
+./validator --config config/validator.toml start
 ./miner --config config/miner.toml
-./executor --config config/executor.toml
+./executor --server --config config/executor.toml
 ```
 
 ## Monitoring Your Deployment
@@ -147,7 +145,7 @@ docker logs basilica-executor
 # Check health endpoints
 curl http://localhost:8080/health  # validator
 curl http://localhost:8080/health  # miner
-curl http://localhost:8080/health  # executor
+curl http://localhost:50052/health  # executor
 ```
 
 ### Access Monitoring Dashboard
