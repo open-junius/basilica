@@ -781,6 +781,11 @@ mod tests {
                 executors: vec![ExecutorConfig {
                     id: "test-executor".to_string(),
                     grpc_address: "127.0.0.1:50051".to_string(),
+                    host: "127.0.0.1".to_string(),
+                    port: 50051,
+                    ssh_port: 22,
+                    ssh_username: "testuser".to_string(),
+                    enabled: true,
                     name: None,
                     metadata: None,
                 }],
@@ -880,6 +885,11 @@ mod tests {
                 executors: vec![ExecutorConfig {
                     id: "test-executor".to_string(),
                     grpc_address: "127.0.0.1:50051".to_string(),
+                    host: "127.0.0.1".to_string(),
+                    port: 50051,
+                    ssh_port: 22,
+                    ssh_username: "testuser".to_string(),
+                    enabled: true,
                     name: None,
                     metadata: None,
                 }],

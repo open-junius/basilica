@@ -467,14 +467,14 @@ impl ValidatorSshClient {
         _executor_id: ExecutorId,
         host: String,
         username: String,
-        port: Option<u16>,
+        port: u16,
         private_key_path: std::path::PathBuf,
         timeout: Option<Duration>,
     ) -> SshConnectionDetails {
         SshConnectionDetails {
             host,
             username,
-            port: port.unwrap_or(22),
+            port,
             private_key_path,
             timeout: timeout.unwrap_or(Duration::from_secs(30)),
         }
@@ -502,7 +502,7 @@ impl ExecutorSshDetails {
         executor_id: ExecutorId,
         host: String,
         username: String,
-        port: Option<u16>,
+        port: u16,
         private_key_path: std::path::PathBuf,
         timeout: Option<Duration>,
     ) -> Self {
@@ -511,7 +511,7 @@ impl ExecutorSshDetails {
             connection: SshConnectionDetails {
                 host,
                 username,
-                port: port.unwrap_or(22),
+                port,
                 private_key_path,
                 timeout: timeout.unwrap_or(Duration::from_secs(30)),
             },
