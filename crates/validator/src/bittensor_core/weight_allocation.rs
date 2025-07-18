@@ -12,6 +12,10 @@ pub struct WeightAllocationEngine {
 
 impl WeightAllocationEngine {
     pub fn new(emission_config: EmissionConfig, min_score_threshold: f64) -> Self {
+        info!(
+            "WeightAllocationEngine initialized with burn_uid: {}, burn_percentage: {:.2}%",
+            emission_config.burn_uid, emission_config.burn_percentage
+        );
         Self {
             emission_config,
             _min_score_threshold: min_score_threshold,
@@ -110,6 +114,11 @@ impl WeightAllocationEngine {
                 uid: self.emission_config.burn_uid,
                 weight: total_burn_weight.min(u16::MAX as u64) as u16,
             };
+
+            debug!(
+                "Allocating burn weight: uid={}, weight={}",
+                burn_weight_entry.uid, burn_weight_entry.weight
+            );
 
             if let Some(existing) = all_weights
                 .iter_mut()

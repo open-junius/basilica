@@ -3,6 +3,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 
+/// Default burn UID for Basilica validator emissions
+pub const DEFAULT_BURN_UID: u16 = 204;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct EmissionConfig {
     /// Percentage of emissions to burn (0.0-100.0)
@@ -167,7 +170,7 @@ impl Default for EmissionConfig {
 
         Self {
             burn_percentage: 0.0,
-            burn_uid: 0,
+            burn_uid: DEFAULT_BURN_UID,
             gpu_allocations,
             weight_set_interval_blocks: 360,
             weight_version_key: 0,

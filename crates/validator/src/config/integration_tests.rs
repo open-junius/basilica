@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use crate::config::ValidatorConfig;
+    use crate::config::{emission::DEFAULT_BURN_UID, ValidatorConfig};
     use common::config::ConfigValidation;
 
     #[test]
@@ -9,11 +9,11 @@ mod tests {
 
         // Verify emission config is included
         assert_eq!(config.emission.burn_percentage, 0.0);
-        assert_eq!(config.emission.burn_uid, 0);
+        assert_eq!(config.emission.burn_uid, DEFAULT_BURN_UID);
         assert_eq!(config.emission.weight_set_interval_blocks, 360);
         assert_eq!(config.emission.gpu_allocations.len(), 2);
 
-        // Verify the config validates
+        // Verify the config validation passes with default burn_uid
         assert!(config.validate().is_ok());
     }
 
@@ -27,7 +27,6 @@ mod tests {
         // Should fail validation
         assert!(config.validate().is_err());
 
-        // Fix the config
         config.emission.burn_percentage = 10.0;
         assert!(config.validate().is_ok());
     }
