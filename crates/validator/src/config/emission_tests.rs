@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use crate::config::emission::EmissionConfig;
+    use crate::config::emission::{EmissionConfig, DEFAULT_BURN_UID};
     use std::collections::HashMap;
     use std::io::Write;
     use std::path::Path;
@@ -13,7 +13,7 @@ mod tests {
 
         // Verify default values
         assert_eq!(config.burn_percentage, 0.0);
-        assert_eq!(config.burn_uid, 0);
+        assert_eq!(config.burn_uid, DEFAULT_BURN_UID);
         assert_eq!(config.weight_set_interval_blocks, 360);
 
         // Verify default GPU allocations
