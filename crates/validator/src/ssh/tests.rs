@@ -20,7 +20,7 @@ mod ssh_tests {
         SshConnectionDetails {
             host: "test.example.com".to_string(),
             username: "testuser".to_string(),
-            port: 22,
+            port: 2222,
             private_key_path: key_path,
             timeout: Duration::from_secs(30),
         }
@@ -108,7 +108,7 @@ mod ssh_tests {
         let client = ValidatorSshClient::new();
         let details = create_test_ssh_details();
         let key = client.get_pool_key(&details);
-        assert_eq!(key, "testuser@test.example.com:22");
+        assert_eq!(key, "testuser@test.example.com:2222");
     }
 
     #[test]
@@ -124,7 +124,7 @@ mod ssh_tests {
         client.update_connection_pool(&details, true);
         let (pool_size, keys) = client.get_pool_info();
         assert_eq!(pool_size, 1);
-        assert!(keys.contains(&"testuser@test.example.com:22".to_string()));
+        assert!(keys.contains(&"testuser@test.example.com:2222".to_string()));
 
         // Update same connection
         client.update_connection_pool(&details, false);
@@ -208,7 +208,7 @@ mod ssh_tests {
             executor_id,
             "test.example.com".to_string(),
             "testuser".to_string(),
-            Some(2222),
+            2222,
             key_path.clone(),
             Some(Duration::from_secs(45)),
         );
@@ -231,9 +231,9 @@ mod ssh_tests {
             executor_id,
             "test.example.com".to_string(),
             "testuser".to_string(),
-            None, // Should default to port 22
+            22,
             key_path.clone(),
-            None, // Should default to 30 seconds
+            None,
         );
 
         assert_eq!(connection.port, 22);
@@ -246,7 +246,7 @@ mod ssh_tests {
 
         assert_eq!(executor_details.connection().host, "test.example.com");
         assert_eq!(executor_details.connection().username, "testuser");
-        assert_eq!(executor_details.connection().port, 22);
+        assert_eq!(executor_details.connection().port, 2222);
         assert_eq!(
             executor_details.connection().timeout,
             Duration::from_secs(30)

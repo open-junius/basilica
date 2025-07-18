@@ -216,19 +216,19 @@ impl MinerState {
 
         // Register all executors with the connection manager
         for executor_config in &config.executor_management.executors {
+            if !executor_config.enabled {
+                info!("Skipping disabled executor: {}", executor_config.id);
+                continue;
+            }
+
             use std::str::FromStr;
             let executor_info = executors::ExecutorInfo {
                 id: common::identity::ExecutorId::from_str(&executor_config.id).map_err(|e| {
                     anyhow::anyhow!("Invalid executor ID '{}': {}", executor_config.id, e)
                 })?,
-                host: executor_config
-                    .grpc_address
-                    .split(':')
-                    .next()
-                    .unwrap_or("localhost")
-                    .to_string(),
-                ssh_port: 22, // Default SSH port
-                ssh_username: config.ssh_session.default_executor_username.clone(),
+                host: executor_config.host.clone(),
+                ssh_port: executor_config.ssh_port,
+                ssh_username: executor_config.ssh_username.clone(),
                 grpc_endpoint: Some(executor_config.grpc_address.clone()),
                 last_health_check: None,
                 is_healthy: true,

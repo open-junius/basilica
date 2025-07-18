@@ -267,6 +267,12 @@ deploy_docker() {
 
     scp_file "scripts/validator/compose.prod.yml" "/opt/basilica/"
 
+    # Deploy telemetry config for Alloy
+    ssh_cmd "mkdir -p /opt/basilica/telemetry"
+    if [[ -f "scripts/validator/telemetry/alloy.yml" ]]; then
+        scp_file "scripts/validator/telemetry/alloy.yml" "/opt/basilica/telemetry/"
+    fi
+
     # Deploy .env file if it exists
     if [[ -f "scripts/validator/.env" ]]; then
         scp_file "scripts/validator/.env" "/opt/basilica/"

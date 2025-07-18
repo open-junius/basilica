@@ -1464,7 +1464,7 @@ impl VerificationEngine {
             executor.id.clone(),
             ssh_details.host,
             ssh_details.username,
-            Some(ssh_details.port),
+            ssh_details.port,
             key_path.clone(),
             Some(self.config.challenge_timeout),
         );
@@ -1564,7 +1564,10 @@ impl VerificationEngine {
                 .context("Invalid port number")?;
             (host, port)
         } else {
-            (host_port.to_string(), 22)
+            return Err(anyhow::anyhow!(
+                "SSH port not specified in credentials. Expected format: username@host:port, got: {}",
+                credentials
+            ));
         };
 
         Ok(SshConnectionDetails {

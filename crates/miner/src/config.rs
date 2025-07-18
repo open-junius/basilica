@@ -161,6 +161,21 @@ pub struct ExecutorConfig {
     /// gRPC address of the executor (host:port)
     pub grpc_address: String,
 
+    /// SSH host for the executor
+    pub host: String,
+
+    /// gRPC port for the executor
+    pub port: u16,
+
+    /// SSH port for the executor
+    pub ssh_port: u16,
+
+    /// SSH username for the executor
+    pub ssh_username: String,
+
+    /// Whether this executor is enabled
+    pub enabled: bool,
+
     /// Optional display name for the executor
     pub name: Option<String>,
 
