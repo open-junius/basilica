@@ -7,10 +7,10 @@ use std::sync::Arc;
 use tokio::time::{interval, Duration};
 use tracing::{error, info, warn};
 
-use crate::persistence::GpuProfileRepository;
+use crate::persistence::gpu_profile_repository::GpuProfileRepository;
 
 /// Configuration for cleanup tasks
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CleanupConfig {
     /// How often to run cleanup (in hours)
     pub run_interval_hours: u64,
