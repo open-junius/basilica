@@ -1,3 +1,4 @@
+pub mod cleanup_task;
 pub mod entities;
 pub mod gpu_profile_repository;
 pub mod simple_persistence;

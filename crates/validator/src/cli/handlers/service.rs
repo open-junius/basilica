@@ -9,6 +9,7 @@ use sysinfo::{Pid, System};
 use tokio::signal;
 use tracing::debug;
 use tracing::error;
+use tracing::info;
 
 pub async fn handle_start(config_path: Option<PathBuf>, local_test: bool) -> Result<()> {
     HandlerUtils::print_info("Starting Basilica Validator...");
@@ -280,6 +281,13 @@ async fn start_validator_services(
 
     let persistence_arc = Arc::new(persistence);
 
+    // Create GPU profile repository (needed for weight setter and cleanup task)
+    let gpu_profile_repo = Arc::new(
+        crate::persistence::gpu_profile_repository::GpuProfileRepository::new(
+            persistence_arc.pool().clone(),
+        ),
+    );
+
     if local_test {
         HandlerUtils::print_info("Running in local test mode - Bittensor services disabled");
     }
@@ -320,14 +328,9 @@ async fn start_validator_services(
         // Initialize weight setter with block-based timing from emission config
         let blocks_per_weight_set = config.emission.weight_set_interval_blocks;
 
-        // Create GPU profile repository and scoring engine
-        let gpu_profile_repo = Arc::new(
-            crate::persistence::gpu_profile_repository::GpuProfileRepository::new(
-                persistence_arc.pool().clone(),
-            ),
-        );
+        // Create GPU scoring engine using the existing gpu_profile_repo
         let gpu_scoring_engine = Arc::new(crate::gpu::GpuScoringEngine::new(
-            gpu_profile_repo,
+            gpu_profile_repo.clone(),
             0.3, // EMA alpha factor
         ));
 
@@ -340,6 +343,7 @@ async fn start_validator_services(
             blocks_per_weight_set,
             gpu_scoring_engine,
             config.emission.clone(),
+            gpu_profile_repo.clone(),
         )?;
         let weight_setter_arc = Arc::new(weight_setter);
 
@@ -395,6 +399,23 @@ async fn start_validator_services(
         }
     });
 
+    // Start cleanup task if enabled
+    let cleanup_task_handle = if config.cleanup.enabled {
+        let cleanup_config = config.cleanup.clone();
+        let gpu_repo = gpu_profile_repo.clone();
+
+        Some(tokio::spawn(async move {
+            let cleanup_task =
+                crate::persistence::cleanup_task::CleanupTask::new(cleanup_config, gpu_repo);
+            if let Err(e) = cleanup_task.start().await {
+                error!("Database cleanup task failed: {}", e);
+            }
+        }))
+    } else {
+        info!("Database cleanup task is disabled");
+        None
+    };
+
     HandlerUtils::print_success("Validator started successfully - all services running");
 
     signal::ctrl_c().await?;
@@ -407,6 +428,9 @@ async fn start_validator_services(
         handle.abort();
     }
     if let Some(handle) = miner_prover_handle {
+        handle.abort();
+    }
+    if let Some(handle) = cleanup_task_handle {
         handle.abort();
     }
     api_handler_handle.abort();

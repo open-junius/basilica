@@ -70,6 +70,10 @@ pub struct ValidatorConfig {
     /// Emission allocation configuration
     #[serde(default)]
     pub emission: super::emission::EmissionConfig,
+
+    /// Database cleanup configuration
+    #[serde(default)]
+    pub cleanup: crate::persistence::cleanup_task::CleanupConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -395,6 +399,7 @@ impl Default for ValidatorConfig {
             },
             ssh_session: SshSessionConfig::default(),
             emission: super::emission::EmissionConfig::default(),
+            cleanup: crate::persistence::cleanup_task::CleanupConfig::default(),
         }
     }
 }

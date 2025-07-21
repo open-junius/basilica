@@ -8,6 +8,7 @@ use crate::config::emission::EmissionConfig;
 use crate::gpu::categorization;
 use crate::gpu::GpuScoringEngine;
 use crate::persistence::entities::VerificationLog;
+use crate::persistence::gpu_profile_repository::GpuProfileRepository;
 use crate::persistence::SimplePersistence;
 use anyhow::Result;
 use bittensor::{AccountId, Metagraph, NormalizedWeight, Service as BittensorService};
@@ -16,6 +17,7 @@ use common::config::BittensorConfig;
 use common::identity::{ExecutorId, MinerUid};
 use common::{KeyValueStorage, MemoryStorage};
 use sqlx::Row;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::interval;
@@ -54,6 +56,7 @@ pub struct WeightSetter {
     gpu_scoring_engine: Arc<GpuScoringEngine>,
     weight_allocation_engine: Arc<WeightAllocationEngine>,
     emission_config: EmissionConfig,
+    gpu_profile_repo: Arc<GpuProfileRepository>,
 }
 
 impl WeightSetter {
@@ -67,6 +70,7 @@ impl WeightSetter {
         blocks_per_weight_set: u64,
         gpu_scoring_engine: Arc<GpuScoringEngine>,
         emission_config: EmissionConfig,
+        gpu_profile_repo: Arc<GpuProfileRepository>,
     ) -> Result<Self> {
         // Create weight allocation engine
         let weight_allocation_engine = Arc::new(WeightAllocationEngine::new(
@@ -85,6 +89,7 @@ impl WeightSetter {
             gpu_scoring_engine,
             weight_allocation_engine,
             emission_config,
+            gpu_profile_repo,
         })
     }
 
@@ -292,7 +297,17 @@ impl WeightSetter {
         self.submit_weights_to_chain_with_retry(normalized_weights.clone(), version_key)
             .await?;
 
-        // 8. Store submission metadata
+        // 8. Store emission metrics to database
+        let current_block = self.get_current_block().await.unwrap_or(0);
+        let emission_metrics_id = self
+            .store_emission_metrics(&weight_distribution, current_block)
+            .await?;
+
+        // 9. Store weight allocation history for each miner
+        self.store_weight_allocations(&weight_distribution, emission_metrics_id, current_block)
+            .await?;
+
+        // 10. Store submission metadata
         self.store_weight_submission_metadata(&weight_distribution)
             .await?;
 
@@ -604,6 +619,119 @@ impl WeightSetter {
         self.storage.set_i64(&key, new_version as i64).await?;
 
         Ok(new_version)
+    }
+
+    /// Store emission metrics to the database
+    async fn store_emission_metrics(
+        &self,
+        weight_distribution: &crate::bittensor_core::weight_allocation::WeightDistribution,
+        current_block: u64,
+    ) -> Result<i64> {
+        use crate::persistence::gpu_profile_repository::{CategoryDistribution, EmissionMetrics};
+
+        // Convert category allocations to CategoryDistribution format
+        let mut category_distributions = HashMap::new();
+        for (category, allocation) in &weight_distribution.category_allocations {
+            category_distributions.insert(
+                category.clone(),
+                CategoryDistribution {
+                    category: category.clone(),
+                    miner_count: allocation.miner_count,
+                    total_weight: allocation.weight_pool,
+                    average_score: allocation.total_score / allocation.miner_count as f64,
+                },
+            );
+        }
+
+        // Calculate burn amount
+        let burn_amount = weight_distribution
+            .burn_allocation
+            .as_ref()
+            .map(|b| b.weight as u64)
+            .unwrap_or(0);
+
+        let emission_metrics = EmissionMetrics {
+            id: 0, // Will be set by database
+            timestamp: Utc::now(),
+            burn_amount,
+            burn_percentage: self.emission_config.burn_percentage,
+            category_distributions,
+            total_miners: weight_distribution.miners_served,
+            weight_set_block: current_block,
+        };
+
+        let metrics_id = self
+            .gpu_profile_repo
+            .store_emission_metrics(&emission_metrics)
+            .await?;
+
+        info!(
+            "Stored emission metrics for block {} with {} categories, burn {}%",
+            current_block,
+            weight_distribution.category_allocations.len(),
+            self.emission_config.burn_percentage
+        );
+
+        Ok(metrics_id)
+    }
+
+    /// Store weight allocation history for each miner
+    async fn store_weight_allocations(
+        &self,
+        weight_distribution: &crate::bittensor_core::weight_allocation::WeightDistribution,
+        emission_metrics_id: i64,
+        current_block: u64,
+    ) -> Result<()> {
+        // First, store burn allocation if present
+        if let Some(burn_allocation) = &weight_distribution.burn_allocation {
+            self.gpu_profile_repo
+                .store_weight_allocation(
+                    emission_metrics_id,
+                    MinerUid::new(burn_allocation.uid),
+                    "BURN",
+                    burn_allocation.weight as u64,
+                    0.0, // No score for burn
+                    0.0, // No category total for burn
+                    current_block,
+                )
+                .await?;
+        }
+
+        // Store allocations for each miner
+        for weight in &weight_distribution.weights {
+            // Find which category this miner belongs to
+            let miner_uid = MinerUid::new(weight.uid);
+
+            // Get miner's GPU profile to determine category
+            if let Ok(Some(profile)) = self.gpu_profile_repo.get_gpu_profile(miner_uid).await {
+                let category = &profile.primary_gpu_model;
+
+                // Get category allocation info
+                if let Some(category_allocation) =
+                    weight_distribution.category_allocations.get(category)
+                {
+                    self.gpu_profile_repo
+                        .store_weight_allocation(
+                            emission_metrics_id,
+                            miner_uid,
+                            category,
+                            weight.weight as u64,
+                            profile.total_score,
+                            category_allocation.total_score,
+                            current_block,
+                        )
+                        .await?;
+                }
+            }
+        }
+
+        info!(
+            "Stored weight allocations for {} miners at block {}",
+            weight_distribution.weights.len(),
+            current_block
+        );
+
+        Ok(())
     }
 
     /// Store metadata about GPU-based weight submission
