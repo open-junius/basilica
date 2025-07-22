@@ -15,7 +15,6 @@ basilica_force_recreate: false
 prometheus_version: "v2.47.0"
 loki_version: "2.9.2"
 grafana_version: "10.2.0"
-alloy_version: "v1.0.0"
 node_exporter_version: "v1.6.1"
 alertmanager_version: "v0.26.0"
 
@@ -23,7 +22,6 @@ alertmanager_version: "v0.26.0"
 prometheus_port: 9090
 loki_port: 3100
 grafana_port: 3000
-alloy_port: 12345
 node_exporter_port: 9100
 alertmanager_port: 9093
 
@@ -54,3 +52,9 @@ nginx_cert_country: "US"
 nginx_cert_state: "State"
 nginx_cert_locality: "City"
 nginx_cert_organization: "yo"
+
+# Validator configuration
+basilica_validator_dir: "/opt/basilica"
+validator_uid: ""
+validator_external_ip: ""
+validator_netuid: ""

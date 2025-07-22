@@ -32,7 +32,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tracing-journald = "0.3"
 metrics = "0.22"
-metrics-exporter-prometheus = "0.12"
+metrics-exporter-prometheus = "0.13"
 
 # Configuration
 figment = { version = "0.10", features = ["toml", "env"] }

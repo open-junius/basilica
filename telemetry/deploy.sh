@@ -196,7 +196,7 @@ echo
 if eval $ANSIBLE_CMD; then
     echo
     print_success "Deployment completed successfully!"
-    
+
     if [[ -z "$CHECK_MODE" ]]; then
         echo
         print_status "Access your telemetry stack:"

@@ -49,7 +49,6 @@
         - "{{ prometheus_port | default(9090) }}"
         - "{{ loki_port | default(3100) }}"
         - "{{ grafana_port | default(3000) }}"
-        - "{{ alloy_port | default(12345) }}"
         - "{{ node_exporter_port | default(9100) }}"
         - "{{ alertmanager_port | default(9093) }}"
 
@@ -64,7 +63,6 @@
         - { name: "Prometheus", url: "http://localhost:{{ prometheus_port | default(9090) }}/-/healthy" }
         - { name: "Loki", url: "http://localhost:{{ loki_port | default(3100) }}/ready" }
         - { name: "Grafana", url: "http://localhost:{{ grafana_port | default(3000) }}/api/health" }
-        - { name: "Alloy", url: "http://localhost:{{ alloy_port | default(12345) }}/-/healthy" }
         - { name: "Node Exporter", url: "http://localhost:{{ node_exporter_port | default(9100) }}/metrics" }
         - { name: "Alertmanager", url: "http://localhost:{{ alertmanager_port | default(9093) }}/-/healthy" }
 

@@ -42,26 +42,15 @@ executor_binary_path = "/opt/basilica/bin/executor-binary"
 execution_timeout_secs = 540
 output_format = "json"
 
-[ssh_validation]
-enabled = true
-timeout = { secs = 60 }
-max_file_size = "10MB"
-allowed_commands = ["gpu-attestor", "nvidia-smi"]
-temp_dir = "/tmp/basilica-validation"
-
-[scoring]
-gpu_weight = 0.4
-cpu_weight = 0.2
-memory_weight = 0.2
-network_weight = 0.1
-reliability_weight = 0.1
-
 [metrics]
 enabled = true
+retention_period = { secs = 604800 }
+collection_interval = { secs = 30 }
+
+[metrics.prometheus]
 host = "0.0.0.0"
 port = 9090
 path = "/metrics"
-retention_period = { secs = 604800 }
 
 [logging]
 level = "debug"
@@ -79,11 +68,6 @@ rate_limit = 100
 
 [storage]
 data_dir = "/opt/basilica/data"
-
-[security]
-enable_authentication = false
-api_key_header = "X-API-Key"
-allowed_api_keys = []
 
 [ssh_session]
 ssh_key_directory = "/opt/basilica/data/ssh_keys"
