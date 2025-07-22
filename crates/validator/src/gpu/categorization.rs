@@ -58,16 +58,7 @@ impl GpuCategorizer {
     pub fn determine_primary_gpu_model(
         executor_validations: &[ExecutorValidationResult],
     ) -> String {
-        let mut gpu_counts: HashMap<String, u32> = HashMap::new();
-
-        // Count GPUs by normalized model, weighted by GPU count
-        for validation in executor_validations
-            .iter()
-            .filter(|v| v.is_valid && v.attestation_valid)
-        {
-            let normalized = Self::normalize_gpu_model(&validation.gpu_model);
-            *gpu_counts.entry(normalized).or_insert(0) += validation.gpu_count as u32;
-        }
+        let gpu_counts = Self::calculate_gpu_distribution(executor_validations);
 
         // Return the model with the highest count
         gpu_counts
@@ -82,13 +73,18 @@ impl GpuCategorizer {
         executor_validations: &[ExecutorValidationResult],
     ) -> HashMap<String, u32> {
         let mut gpu_counts = HashMap::new();
+        let mut seen_executors = std::collections::HashSet::new();
 
+        // Count GPUs per unique executor to avoid double-counting
         for validation in executor_validations
             .iter()
             .filter(|v| v.is_valid && v.attestation_valid)
         {
-            let normalized = Self::normalize_gpu_model(&validation.gpu_model);
-            *gpu_counts.entry(normalized).or_insert(0) += validation.gpu_count as u32;
+            // Only count each executor once
+            if seen_executors.insert(&validation.executor_id) {
+                let normalized = Self::normalize_gpu_model(&validation.gpu_model);
+                *gpu_counts.entry(normalized).or_insert(0) += validation.gpu_count as u32;
+            }
         }
 
         gpu_counts

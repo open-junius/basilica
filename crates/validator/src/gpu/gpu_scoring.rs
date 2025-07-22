@@ -122,48 +122,49 @@ impl GpuScoringEngine {
             return 0.0;
         }
 
-        const MAX_GPU_COUNT: f64 = 8.0;
-
         let mut valid_count = 0;
         let mut total_count = 0;
-        let mut valid_gpu_count = 0;
+        let mut total_gpu_count = 0;
+        let mut unique_executors = std::collections::HashSet::new();
 
+        // count unique executors and their GPU counts
         for validation in executor_validations {
+            unique_executors.insert(&validation.executor_id);
             total_count += 1;
 
-            // Count valid attestations and their GPU counts
+            // Count valid attestations and accumulate GPU counts
             if validation.is_valid && validation.attestation_valid {
                 valid_count += 1;
-                valid_gpu_count += validation.gpu_count;
+            }
+        }
+
+        // sum GPU counts from unique executors only
+        let mut seen_executors = std::collections::HashSet::new();
+        for validation in executor_validations {
+            if validation.is_valid
+                && validation.attestation_valid
+                && seen_executors.insert(&validation.executor_id)
+            {
+                total_gpu_count += validation.gpu_count;
             }
         }
 
         if total_count > 0 {
             // Calculate base pass/fail ratio
-            let validation_ratio = valid_count as f64 / total_count as f64;
+            let final_score = valid_count as f64 / total_count as f64;
 
-            // Calculate average GPU count for valid validations
-            let avg_gpu_count = if valid_count > 0 {
-                valid_gpu_count as f64 / valid_count as f64
-            } else {
-                0.0
-            };
-
-            // Apply GPU count weighting (normalized to MAX_GPU_COUNT)
-            let gpu_weight = (avg_gpu_count / MAX_GPU_COUNT).min(1.0);
-
-            // Combine validation ratio with GPU count weight
-            let final_score = validation_ratio * gpu_weight;
+            // Log the actual GPU-weighted score for transparency
+            let gpu_weighted_score = final_score * total_gpu_count as f64;
 
             debug!(
                 validations = executor_validations.len(),
                 valid_count = valid_count,
                 total_count = total_count,
-                avg_gpu_count = avg_gpu_count,
-                gpu_weight = gpu_weight,
-                validation_ratio = validation_ratio,
+                unique_executors = unique_executors.len(),
+                total_gpu_count = total_gpu_count,
                 final_score = final_score,
-                "Calculated verification score with GPU count weighting"
+                gpu_weighted_score = gpu_weighted_score,
+                "Calculated verification score (normalized for DB, GPU count tracked separately)"
             );
             final_score
         } else {
@@ -246,17 +247,10 @@ impl GpuScoringEngine {
                 continue;
             }
 
-            // Calculate total rewardable GPUs (only H100 and H200)
-            let total_rewardable_gpus: u32 = rewardable_gpu_counts.values().sum();
-
             // Add the miner to each rewardable category they have GPUs in
             for (normalized_model, gpu_count) in rewardable_gpu_counts {
-                // Calculate proportional score based on rewardable GPU count
-                let category_score = if total_rewardable_gpus > 0 {
-                    profile.total_score * (gpu_count as f64 / total_rewardable_gpus as f64)
-                } else {
-                    0.0
-                };
+                // Multiply by gpu_count to get the actual linear score
+                let category_score = profile.total_score * gpu_count as f64;
 
                 miners_by_category
                     .entry(normalized_model)
@@ -417,8 +411,9 @@ mod tests {
         ];
 
         let score = engine.calculate_verification_score(&validations);
-        // 2 valid validations, avg GPU count = (2+1)/2 = 1.5
-        let expected = 1.0 * (1.5 / 8.0); // 0.1875
+        // 2 valid validations: validation_ratio = 1.0
+        // Actual GPU weight = 1.0 * 3 = 3.0
+        let expected = 1.0;
         assert!((score - expected).abs() < 0.001);
 
         // Test with invalid attestations
@@ -458,8 +453,9 @@ mod tests {
         ];
 
         let score = engine.calculate_verification_score(&mixed_validations);
-        // 1 valid out of 2 = 0.5 validation ratio, 2 GPUs average = 2/8 weight
-        let expected = 0.5 * (2.0 / 8.0); // 0.125
+        // 1 valid out of 2 = 0.5 validation ratio
+        // Actual GPU weight = 0.5 * 2 = 1.0
+        let expected = 0.5;
         assert!((score - expected).abs() < 0.001);
 
         // Test with empty validations
@@ -490,9 +486,9 @@ mod tests {
 
         let high_score = engine.calculate_verification_score(&high_memory_validations);
         let low_score = engine.calculate_verification_score(&low_memory_validations);
-        // With GPU count weighting, single GPU gets 1/8 weight
-        assert_eq!(high_score, 1.0 * (1.0 / 8.0)); // 0.125
-        assert_eq!(low_score, 1.0 * (1.0 / 8.0)); // 0.125
+        // Actual GPU weight = 1.0 * 1 = 1.0
+        assert_eq!(high_score, 1.0);
+        assert_eq!(low_score, 1.0);
     }
 
     #[tokio::test]
@@ -513,26 +509,26 @@ mod tests {
             }];
 
             let score = engine.calculate_verification_score(&validations);
-            let expected_score = 1.0 * (gpu_count as f64 / 8.0);
+            let expected_score = 1.0;
             assert!(
                 (score - expected_score).abs() < 0.001,
                 "GPU count {gpu_count} should give score {expected_score}, got {score}"
             );
         }
 
-        // Test with more than 8 GPUs (should cap at 1.0)
+        // Test with many GPUs (no cap, linear scaling)
         let many_gpu_validations = vec![ExecutorValidationResult {
             executor_id: "exec_many".to_string(),
             is_valid: true,
             gpu_model: "H100".to_string(),
-            gpu_count: 16,
+            gpu_count: 128,
             gpu_memory_gb: 80,
             attestation_valid: true,
             validation_timestamp: Utc::now(),
         }];
 
         let score = engine.calculate_verification_score(&many_gpu_validations);
-        assert_eq!(score, 1.0); // Should cap at 1.0
+        assert_eq!(score, 1.0);
     }
 
     #[tokio::test]
@@ -578,9 +574,7 @@ mod tests {
         assert_eq!(updated_profile.miner_uid, miner_uid);
         assert_eq!(updated_profile.primary_gpu_model, "H100");
 
-        // Score should be different due to different GPU count (1 vs 2)
-        // New profile has 1 GPU, so score = 1.0 * (1/8) = 0.125
-        assert_eq!(updated_profile.total_score, 1.0 * (1.0 / 8.0));
+        assert_eq!(updated_profile.total_score, 1.0);
     }
 
     #[tokio::test]
@@ -710,8 +704,7 @@ mod tests {
         ];
 
         let score = engine.calculate_verification_score(&partial_success);
-        // 2 out of 3 passed = 2/3 validation ratio, 1 GPU average = 1/8 weight
-        let expected = (2.0 / 3.0) * (1.0 / 8.0); // ~0.0833
+        let expected = 2.0 / 3.0; // Stored score is validation ratio
         assert!((score - expected).abs() < 0.001);
     }
 
@@ -753,8 +746,7 @@ mod tests {
             .await
             .unwrap();
 
-        // Score should be 1.0 * (1/8) = 0.125 (1 GPU)
-        assert_eq!(profile.total_score, 1.0 * (1.0 / 8.0));
+        assert_eq!(profile.total_score, 1.0);
     }
 
     #[tokio::test]
@@ -777,12 +769,7 @@ mod tests {
             }];
 
             let score = engine.calculate_verification_score(&validations);
-            // All have 1 GPU, so score should be 1.0 * (1/8) = 0.125
-            assert_eq!(
-                score,
-                1.0 * (1.0 / 8.0),
-                "Memory {memory} should give score 0.125"
-            );
+            assert_eq!(score, 1.0, "Memory {memory} should give score 1.0");
         }
     }
 }

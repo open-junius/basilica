@@ -1025,7 +1025,7 @@ impl VerificationEngine {
                 .try_get("status")
                 .unwrap_or_else(|_| "unknown".to_string());
 
-            let new_id = format!("{}_{}", new_miner_id, executor_id);
+            let new_id = format!("{new_miner_id}_{executor_id}");
 
             let insert_executor = r#"
                 INSERT INTO miner_executors (
