@@ -38,6 +38,17 @@ impl SimplePersistence {
 
         let pool = sqlx::SqlitePool::connect(&final_url).await?;
 
+        // Configure SQLite for better concurrency
+        sqlx::query("PRAGMA journal_mode = WAL")
+            .execute(&pool)
+            .await?;
+        sqlx::query("PRAGMA busy_timeout = 5000")
+            .execute(&pool)
+            .await?;
+        sqlx::query("PRAGMA synchronous = NORMAL")
+            .execute(&pool)
+            .await?;
+
         let instance = Self { pool };
         instance.run_migrations().await?;
 
