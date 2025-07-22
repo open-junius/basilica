@@ -11,15 +11,13 @@ use common::identity::MinerUid;
 
 pub struct GpuScoringEngine {
     gpu_profile_repo: Arc<GpuProfileRepository>,
-    ema_alpha: f64, // Exponential moving average factor
     metrics: Option<Arc<ValidatorMetrics>>,
 }
 
 impl GpuScoringEngine {
-    pub fn new(gpu_profile_repo: Arc<GpuProfileRepository>, ema_alpha: f64) -> Self {
+    pub fn new(gpu_profile_repo: Arc<GpuProfileRepository>) -> Self {
         Self {
             gpu_profile_repo,
-            ema_alpha,
             metrics: None,
         }
     }
@@ -27,12 +25,10 @@ impl GpuScoringEngine {
     /// Create new engine with metrics support
     pub fn with_metrics(
         gpu_profile_repo: Arc<GpuProfileRepository>,
-        ema_alpha: f64,
         metrics: Arc<ValidatorMetrics>,
     ) -> Self {
         Self {
             gpu_profile_repo,
-            ema_alpha,
             metrics: Some(metrics),
         }
     }
@@ -49,13 +45,8 @@ impl GpuScoringEngine {
         // Determine primary GPU model
         let primary_gpu_model = GpuCategorizer::determine_primary_gpu_model(&executor_validations);
 
-        // Apply EMA smoothing if there's an existing profile
-        let smoothed_score = self
-            .apply_ema_smoothing(miner_uid, &primary_gpu_model, new_score)
-            .await?;
-
-        // Create or update the profile
-        let profile = MinerGpuProfile::new(miner_uid, &executor_validations, smoothed_score);
+        // Create or update the profile with the calculated score
+        let profile = MinerGpuProfile::new(miner_uid, &executor_validations, new_score);
 
         // Store the profile
         self.gpu_profile_repo.upsert_gpu_profile(&profile).await?;
@@ -63,7 +54,7 @@ impl GpuScoringEngine {
         info!(
             miner_uid = miner_uid.as_u16(),
             primary_gpu = %primary_gpu_model,
-            score = smoothed_score,
+            score = new_score,
             total_gpus = profile.total_gpu_count(),
             validations = executor_validations.len(),
             gpu_distribution = ?profile.gpu_counts,
@@ -76,7 +67,7 @@ impl GpuScoringEngine {
             metrics.prometheus().record_miner_gpu_profile(
                 miner_uid.as_u16(),
                 profile.total_gpu_count(),
-                smoothed_score,
+                new_score,
             );
 
             // Record individual executor GPU counts
@@ -97,7 +88,7 @@ impl GpuScoringEngine {
                             &validation.gpu_model,
                             validation.gpu_count,
                             validation.is_valid && validation.attestation_valid,
-                            smoothed_score,
+                            new_score,
                         )
                         .await;
                 }
@@ -167,22 +158,6 @@ impl GpuScoringEngine {
             );
             0.0
         }
-    }
-
-    /// Apply EMA smoothing to score
-    async fn apply_ema_smoothing(
-        &self,
-        miner_uid: MinerUid,
-        _gpu_model: &str,
-        new_score: f64,
-    ) -> Result<f64> {
-        // EMA smoothing removed - always use the new score directly
-        debug!(
-            miner_uid = miner_uid.as_u16(),
-            new_score = new_score,
-            "Using new score without EMA smoothing"
-        );
-        Ok(new_score)
     }
 
     /// Get all miners grouped by GPU category with multi-category support
@@ -370,16 +345,6 @@ impl GpuScoringEngine {
 
         Ok(category_stats)
     }
-
-    /// Get the EMA alpha value
-    pub fn get_ema_alpha(&self) -> f64 {
-        self.ema_alpha
-    }
-
-    /// Update EMA alpha value
-    pub fn set_ema_alpha(&mut self, alpha: f64) {
-        self.ema_alpha = alpha.clamp(0.0, 1.0);
-    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -412,7 +377,7 @@ mod tests {
     #[tokio::test]
     async fn test_verification_score_calculation() {
         let (repo, _temp_file) = create_test_gpu_profile_repo().await.unwrap();
-        let engine = GpuScoringEngine::new(repo, 0.3);
+        let engine = GpuScoringEngine::new(repo);
 
         // Test with valid attestations
         let validations = vec![
@@ -518,7 +483,7 @@ mod tests {
     #[tokio::test]
     async fn test_gpu_count_weighting() {
         let (repo, _temp_file) = create_test_gpu_profile_repo().await.unwrap();
-        let engine = GpuScoringEngine::new(repo, 0.3);
+        let engine = GpuScoringEngine::new(repo);
 
         // Test different GPU counts
         for gpu_count in 1..=8 {
@@ -558,7 +523,7 @@ mod tests {
     #[tokio::test]
     async fn test_miner_profile_update() {
         let (repo, _temp_file) = create_test_gpu_profile_repo().await.unwrap();
-        let engine = GpuScoringEngine::new(repo, 0.3);
+        let engine = GpuScoringEngine::new(repo);
 
         let miner_uid = MinerUid::new(1);
         let validations = vec![ExecutorValidationResult {
@@ -604,53 +569,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_ema_smoothing() {
-        let (repo, _temp_file) = create_test_gpu_profile_repo().await.unwrap();
-        let engine = GpuScoringEngine::new(repo.clone(), 0.3);
-
-        let miner_uid = MinerUid::new(1);
-
-        // Create initial profile
-        let mut gpu_counts = HashMap::new();
-        gpu_counts.insert("H100".to_string(), 2);
-
-        let initial_profile = MinerGpuProfile {
-            miner_uid,
-            primary_gpu_model: "H100".to_string(),
-            gpu_counts,
-            total_score: 0.5,
-            verification_count: 1,
-            last_updated: Utc::now(),
-        };
-
-        repo.upsert_gpu_profile(&initial_profile).await.unwrap();
-
-        // Test that EMA smoothing is disabled - should always return new score
-        let smoothed_score = engine
-            .apply_ema_smoothing(miner_uid, "H100", 0.8)
-            .await
-            .unwrap();
-        assert_eq!(smoothed_score, 0.8); // Should return new score without smoothing
-
-        // Test with different GPU model - should still return new score
-        let new_score = engine
-            .apply_ema_smoothing(miner_uid, "H200", 0.9)
-            .await
-            .unwrap();
-        assert_eq!(new_score, 0.9);
-
-        // Test with non-existent miner - should return new score
-        let new_miner_score = engine
-            .apply_ema_smoothing(MinerUid::new(999), "H100", 0.7)
-            .await
-            .unwrap();
-        assert_eq!(new_miner_score, 0.7);
-    }
-
-    #[tokio::test]
     async fn test_category_statistics() {
         let (repo, _temp_file) = create_test_gpu_profile_repo().await.unwrap();
-        let engine = GpuScoringEngine::new(repo.clone(), 0.3);
+        let engine = GpuScoringEngine::new(repo.clone());
 
         // Create test profiles
         let mut h100_counts_1 = HashMap::new();
@@ -713,27 +634,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_ema_alpha_functions() {
-        let (repo, _temp_file) = create_test_gpu_profile_repo().await.unwrap();
-        let mut engine = GpuScoringEngine::new(repo, 0.3);
-
-        assert_eq!(engine.get_ema_alpha(), 0.3);
-
-        engine.set_ema_alpha(0.5);
-        assert_eq!(engine.get_ema_alpha(), 0.5);
-
-        // Test clamping
-        engine.set_ema_alpha(1.5);
-        assert_eq!(engine.get_ema_alpha(), 1.0);
-
-        engine.set_ema_alpha(-0.5);
-        assert_eq!(engine.get_ema_alpha(), 0.0);
-    }
-
-    #[tokio::test]
     async fn test_pass_fail_scoring_edge_cases() {
         let (repo, _temp_file) = create_test_gpu_profile_repo().await.unwrap();
-        let engine = GpuScoringEngine::new(repo, 0.3);
+        let engine = GpuScoringEngine::new(repo);
 
         // Test all invalid validations
         let all_invalid = vec![
@@ -798,9 +701,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_no_ema_smoothing_verification() {
+    async fn test_direct_score_update() {
         let (repo, _temp_file) = create_test_gpu_profile_repo().await.unwrap();
-        let engine = GpuScoringEngine::new(repo.clone(), 0.3);
+        let engine = GpuScoringEngine::new(repo.clone());
 
         let miner_uid = MinerUid::new(100);
 
@@ -835,14 +738,14 @@ mod tests {
             .await
             .unwrap();
 
-        // Score should be 1.0 * (1/8) = 0.125 (no EMA smoothing, 1 GPU)
+        // Score should be 1.0 * (1/8) = 0.125 (1 GPU)
         assert_eq!(profile.total_score, 1.0 * (1.0 / 8.0));
     }
 
     #[tokio::test]
     async fn test_scoring_ignores_gpu_memory() {
         let (repo, _temp_file) = create_test_gpu_profile_repo().await.unwrap();
-        let engine = GpuScoringEngine::new(repo, 0.3);
+        let engine = GpuScoringEngine::new(repo);
 
         // Test various memory sizes all get same score
         let memory_sizes = vec![16, 24, 40, 80, 100];
@@ -866,40 +769,5 @@ mod tests {
                 "Memory {memory} should give score 0.125"
             );
         }
-    }
-
-    #[tokio::test]
-    async fn test_apply_ema_smoothing_always_returns_new_score() {
-        let (repo, _temp_file) = create_test_gpu_profile_repo().await.unwrap();
-        let engine = GpuScoringEngine::new(repo.clone(), 0.3);
-
-        // Test with existing profile
-        let miner_uid = MinerUid::new(1);
-        let existing_profile = MinerGpuProfile {
-            miner_uid,
-            primary_gpu_model: "H100".to_string(),
-            gpu_counts: HashMap::new(),
-            total_score: 0.5,
-            verification_count: 1,
-            last_updated: Utc::now(),
-        };
-        repo.upsert_gpu_profile(&existing_profile).await.unwrap();
-
-        // Apply smoothing with various scores
-        let test_scores = vec![0.1, 0.5, 0.9, 1.0];
-        for new_score in test_scores {
-            let result = engine
-                .apply_ema_smoothing(miner_uid, "H100", new_score)
-                .await
-                .unwrap();
-            assert_eq!(result, new_score, "Should always return new score");
-        }
-
-        // Test with non-existent miner
-        let result = engine
-            .apply_ema_smoothing(MinerUid::new(999), "H100", 0.75)
-            .await
-            .unwrap();
-        assert_eq!(result, 0.75);
     }
 }

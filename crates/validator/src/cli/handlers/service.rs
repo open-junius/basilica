@@ -332,14 +332,10 @@ async fn start_validator_services(
         let gpu_scoring_engine = if let Some(ref metrics) = validator_metrics {
             Arc::new(crate::gpu::GpuScoringEngine::with_metrics(
                 gpu_profile_repo.clone(),
-                0.3, // EMA alpha factor
                 Arc::new(metrics.clone()),
             ))
         } else {
-            Arc::new(crate::gpu::GpuScoringEngine::new(
-                gpu_profile_repo.clone(),
-                0.3, // EMA alpha factor
-            ))
+            Arc::new(crate::gpu::GpuScoringEngine::new(gpu_profile_repo.clone()))
         };
 
         let weight_setter = crate::bittensor_core::WeightSetter::new(
