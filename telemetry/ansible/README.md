@@ -307,7 +307,6 @@ volumes:
    docker logs basilica-grafana
    docker logs basilica-prometheus
    docker logs basilica-loki
-   docker logs basilica-alloy
    ```
 
 3. **NGINX logs:**

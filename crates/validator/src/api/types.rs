@@ -223,8 +223,6 @@ pub struct ExecutorHealthStatus {
     pub executor_id: String,
     pub status: String,
     pub last_seen: chrono::DateTime<chrono::Utc>,
-    pub gpu_utilization: f64,
-    pub memory_usage: f64,
 }
 
 /// Verification trigger request

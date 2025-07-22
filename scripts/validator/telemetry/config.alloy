@@ -182,6 +182,27 @@ prometheus.scrape "system" {
   forward_to = [prometheus.remote_write.default.receiver]
 }
 
+// Scrape validator application metrics
+prometheus.scrape "validator" {
+  targets = [
+    {
+      __address__ = "validator:9090",
+      job         = "validator",
+      instance    = env("VALIDATOR_IP"),
+      validator_uid = env("VALIDATOR_UID"),
+      netuid      = env("NETUID"),
+      environment = "production",
+      component   = "validator",
+      project     = "basilica",
+      node_type   = "validator",
+      deployment  = "validator-prod",
+    },
+  ]
+  forward_to = [prometheus.remote_write.default.receiver]
+  scrape_interval = "15s"
+  metrics_path = "/metrics"
+}
+
 prometheus.remote_write "default" {
   endpoint {
     url = "https://basilica-telemetry.tplr.ai/api/v1/write"

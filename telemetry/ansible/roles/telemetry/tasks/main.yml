@@ -80,7 +80,7 @@
 
 - name: Create Basilica network if it doesn't exist
   command: docker network create {{ basilica_network_name | default('basilica_network') }}
-  when: 
+  when:
     - basilica_network_external | default(true)
     - network_check.rc != 0
 

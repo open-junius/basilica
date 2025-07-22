@@ -329,10 +329,14 @@ async fn start_validator_services(
         let blocks_per_weight_set = config.emission.weight_set_interval_blocks;
 
         // Create GPU scoring engine using the existing gpu_profile_repo
-        let gpu_scoring_engine = Arc::new(crate::gpu::GpuScoringEngine::new(
-            gpu_profile_repo.clone(),
-            0.3, // EMA alpha factor
-        ));
+        let gpu_scoring_engine = if let Some(ref metrics) = validator_metrics {
+            Arc::new(crate::gpu::GpuScoringEngine::with_metrics(
+                gpu_profile_repo.clone(),
+                Arc::new(metrics.clone()),
+            ))
+        } else {
+            Arc::new(crate::gpu::GpuScoringEngine::new(gpu_profile_repo.clone()))
+        };
 
         let weight_setter = crate::bittensor_core::WeightSetter::new(
             config.bittensor.common.clone(),

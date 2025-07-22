@@ -402,10 +402,12 @@ impl WeightSetter {
         {
             Ok(profile) => {
                 info!(
-                    "Successfully updated GPU profile for miner {}: gpu_model={}, score={}",
+                    "Successfully updated GPU profile for miner {}: gpu_model={}, total_gpus={}, score={:.4}, gpu_distribution={:?}",
                     miner_uid.as_u16(),
                     profile.primary_gpu_model,
-                    profile.total_score
+                    profile.total_gpu_count(),
+                    profile.total_score,
+                    profile.gpu_counts
                 );
             }
             Err(e) => {
@@ -923,8 +925,17 @@ impl WeightSetter {
 
                 let score = self.calculate_hardware_score(&specs);
 
+                debug!(
+                    "Executor {}: Extracted GPU info - model: {}, count: {}, validation_success: {}",
+                    executor_id, gpu_model, gpu_count, log.success
+                );
+
                 (score, gpu_count, gpu_memory, bandwidth, gpu_model)
             } else {
+                debug!(
+                    "Executor {}: No hardware specs available, validation_success: {}",
+                    executor_id, log.success
+                );
                 (0.0, 0, 0, 0.0, "UNKNOWN".to_string())
             };
 

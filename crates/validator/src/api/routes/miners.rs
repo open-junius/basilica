@@ -276,8 +276,6 @@ pub async fn get_miner_health(
                     executor_id: eh.executor_id,
                     status: eh.status,
                     last_seen: eh.last_seen,
-                    gpu_utilization: eh.gpu_utilization,
-                    memory_usage: eh.memory_usage,
                 })
                 .collect();
 

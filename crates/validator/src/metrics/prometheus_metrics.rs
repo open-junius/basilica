@@ -124,6 +124,20 @@ impl ValidatorPrometheusMetrics {
             "Total attestation verifications"
         );
 
+        // GPU metrics
+        describe_gauge!(
+            "basilica_validator_miner_gpu_count",
+            "Total GPU count per miner"
+        );
+        describe_histogram!(
+            "basilica_validator_miner_gpu_weighted_score",
+            "GPU count weighted scores for miners"
+        );
+        describe_gauge!(
+            "basilica_validator_executor_gpu_count",
+            "GPU count per executor"
+        );
+
         Ok(Self {
             start_time: Instant::now(),
             last_collection: Arc::new(RwLock::new(SystemTime::now())),
@@ -240,6 +254,23 @@ impl ValidatorPrometheusMetrics {
     /// Record attestation verification
     pub fn record_attestation_verification(&self, _success: bool, _attestation_type: &str) {
         counter!("basilica_validator_attestation_verification_total").increment(1);
+    }
+
+    /// Record GPU profile metrics for a miner
+    pub fn record_miner_gpu_profile(&self, miner_uid: u16, gpu_count: u32, weighted_score: f64) {
+        gauge!("basilica_validator_miner_gpu_count", "miner_uid" => miner_uid.to_string())
+            .set(gpu_count as f64);
+        histogram!("basilica_validator_miner_gpu_weighted_score", "miner_uid" => miner_uid.to_string())
+            .record(weighted_score);
+    }
+
+    /// Record GPU count for an executor
+    pub fn record_executor_gpu_count(&self, executor_id: &str, gpu_model: &str, gpu_count: usize) {
+        gauge!("basilica_validator_executor_gpu_count",
+            "executor_id" => executor_id.to_string(),
+            "gpu_model" => gpu_model.to_string()
+        )
+        .set(gpu_count as f64);
     }
 
     /// Collect system metrics periodically

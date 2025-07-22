@@ -818,8 +818,6 @@ impl SimplePersistence {
                     .get::<Option<String>, _>("status")
                     .unwrap_or_else(|| "unknown".to_string()),
                 last_seen,
-                gpu_utilization: 75.0, // Mock data
-                memory_usage: 60.0,    // Mock data
             });
         }
 
@@ -948,8 +946,6 @@ pub struct ExecutorHealthData {
     pub executor_id: String,
     pub status: String,
     pub last_seen: DateTime<Utc>,
-    pub gpu_utilization: f64,
-    pub memory_usage: f64,
 }
 
 /// Executor details for miner listings

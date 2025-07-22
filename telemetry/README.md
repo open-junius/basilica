@@ -65,13 +65,6 @@ cd ansible
   - `basilica_validator_logs.json`: Log analysis dashboard
 - **Provisioning**: Automatic datasource and dashboard provisioning
 
-### Alloy (`alloy.yml`)
-
-- Collects logs from validator container
-- Forwards metrics from validator to Prometheus
-- Includes system metrics collection
-- Processes and labels log entries
-
 ## Metrics Collected
 
 The validator exposes comprehensive metrics on port 9090:
@@ -204,5 +197,4 @@ View service logs:
 docker logs basilica-prometheus
 docker logs basilica-loki
 docker logs basilica-grafana
-docker logs basilica-alloy
 ```
