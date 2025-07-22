@@ -786,30 +786,58 @@ impl VerificationEngine {
         &self,
         miner_info: &super::types::MinerInfo,
     ) -> Result<()> {
-        let miner_id = format!("miner_{}", miner_info.uid.as_u16());
+        let new_miner_id = format!("miner_{}", miner_info.uid.as_u16());
+        let hotkey = miner_info.hotkey.to_string();
 
         // Check if miner already exists
-        let query = "SELECT COUNT(*) as count FROM miners WHERE id = ?";
-        let row = sqlx::query(query)
-            .bind(&miner_id)
-            .fetch_one(self.persistence.pool())
+        let check_hotkey_query = "SELECT id FROM miners WHERE hotkey = ?";
+        let existing_miner = sqlx::query(check_hotkey_query)
+            .bind(&hotkey)
+            .fetch_optional(self.persistence.pool())
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to check miner existence: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to check miner by hotkey: {}", e))?;
 
-        let count: i64 = row.get("count");
+        if let Some(row) = existing_miner {
+            let old_miner_id: String = row.get("id");
 
-        if count == 0 {
-            // Insert new miner record with real data
+            if old_miner_id != new_miner_id {
+                info!(
+                    "Detected UID change for hotkey {}: {} -> {}",
+                    hotkey, old_miner_id, new_miner_id
+                );
+
+                self.migrate_miner_uid(&old_miner_id, &new_miner_id, miner_info)
+                    .await?;
+            } else {
+                let update_query = r#"
+                    UPDATE miners SET
+                        endpoint = ?, verification_score = ?,
+                        last_seen = datetime('now'), updated_at = datetime('now')
+                    WHERE id = ?
+                "#;
+
+                sqlx::query(update_query)
+                    .bind(&miner_info.endpoint)
+                    .bind(miner_info.verification_score)
+                    .bind(&new_miner_id)
+                    .execute(self.persistence.pool())
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to update miner: {}", e))?;
+
+                debug!("Updated miner record: {} with latest data", new_miner_id);
+            }
+        } else {
+            // No existing miner with this hotkey, create new record
             let insert_query = r#"
-                INSERT OR IGNORE INTO miners (
+                INSERT INTO miners (
                     id, hotkey, endpoint, verification_score, uptime_percentage,
                     last_seen, registered_at, updated_at, executor_info
                 ) VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now'), datetime('now'), ?)
             "#;
 
             sqlx::query(insert_query)
-                .bind(&miner_id)
-                .bind(miner_info.hotkey.to_string())
+                .bind(&new_miner_id)
+                .bind(&hotkey)
                 .bind(&miner_info.endpoint)
                 .bind(miner_info.verification_score)
                 .bind(0.0) // uptime_percentage
@@ -820,30 +848,85 @@ impl VerificationEngine {
 
             info!(
                 "Created miner record: {} with hotkey {} and endpoint {}",
-                miner_id,
-                miner_info.hotkey.to_string(),
-                miner_info.endpoint
+                new_miner_id, hotkey, miner_info.endpoint
             );
-        } else {
-            // Update existing miner with latest information
-            let update_query = r#"
-                UPDATE miners SET
-                    hotkey = ?, endpoint = ?, verification_score = ?,
-                    last_seen = datetime('now'), updated_at = datetime('now')
-                WHERE id = ?
-            "#;
-
-            sqlx::query(update_query)
-                .bind(miner_info.hotkey.to_string())
-                .bind(&miner_info.endpoint)
-                .bind(miner_info.verification_score)
-                .bind(&miner_id)
-                .execute(self.persistence.pool())
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to update miner: {}", e))?;
-
-            debug!("Updated miner record: {} with latest data", miner_id);
         }
+
+        Ok(())
+    }
+
+    /// Migrate miner UID when it changes in the network
+    async fn migrate_miner_uid(
+        &self,
+        old_miner_id: &str,
+        new_miner_id: &str,
+        miner_info: &super::types::MinerInfo,
+    ) -> Result<()> {
+        info!(
+            "Starting UID migration: {} -> {} for hotkey {}",
+            old_miner_id, new_miner_id, miner_info.hotkey
+        );
+
+        // Use a transaction to ensure atomicity
+        let mut tx = self.persistence.pool().begin().await?;
+
+        // 1. Update the miner record ID
+        let update_miner_query = r#"
+            UPDATE miners SET
+                id = ?, endpoint = ?, verification_score = ?,
+                last_seen = datetime('now'), updated_at = datetime('now')
+            WHERE id = ?
+        "#;
+
+        sqlx::query(update_miner_query)
+            .bind(new_miner_id)
+            .bind(&miner_info.endpoint)
+            .bind(miner_info.verification_score)
+            .bind(old_miner_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to update miner ID: {}", e))?;
+
+        // 2. Update miner_executors relationships
+        let update_executors_query = r#"
+            UPDATE miner_executors SET
+                miner_id = ?,
+                id = miner_id || '_' || executor_id,
+                updated_at = datetime('now')
+            WHERE miner_id = ?
+        "#;
+
+        let executor_count = sqlx::query(update_executors_query)
+            .bind(new_miner_id)
+            .bind(old_miner_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to update miner_executors: {}", e))?
+            .rows_affected();
+
+        // 3. Update verification_requests
+        let update_requests_query = r#"
+            UPDATE verification_requests SET
+                miner_id = ?,
+                updated_at = datetime('now')
+            WHERE miner_id = ?
+        "#;
+
+        let request_count = sqlx::query(update_requests_query)
+            .bind(new_miner_id)
+            .bind(old_miner_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to update verification_requests: {}", e))?
+            .rows_affected();
+
+        // Commit the transaction
+        tx.commit().await?;
+
+        info!(
+            "Successfully migrated miner UID: {} -> {}. Updated {} executors, {} requests",
+            old_miner_id, new_miner_id, executor_count, request_count
+        );
 
         Ok(())
     }
