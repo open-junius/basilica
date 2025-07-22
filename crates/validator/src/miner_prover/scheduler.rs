@@ -96,6 +96,17 @@ impl VerificationScheduler {
             discovered_miners.len()
         );
 
+        // Sync miners from metagraph to database
+        info!("[EVAL_FLOW] Syncing discovered miners to database");
+        if let Err(e) = verification
+            .sync_miners_from_metagraph(&discovered_miners)
+            .await
+        {
+            warn!("[EVAL_FLOW] Failed to sync miners to database: {}", e);
+        } else {
+            info!("[EVAL_FLOW] Successfully synced miners to database");
+        }
+
         // Log detailed miner information
         for (i, miner) in discovered_miners.iter().enumerate() {
             debug!(
@@ -194,6 +205,8 @@ impl VerificationScheduler {
             miner_uid: miner_info.uid.as_u16(),
             miner_hotkey: miner_info.hotkey.to_string(),
             miner_endpoint: miner_info.endpoint.clone(),
+            stake_tao: miner_info.stake_tao,
+            is_validator: miner_info.is_validator,
             verification_type: VerificationType::AutomatedWithSsh,
             created_at: chrono::Utc::now(),
             timeout: self.config.challenge_timeout,
@@ -399,6 +412,8 @@ impl VerificationScheduler {
                 miner_uid: miner.uid.as_u16(),
                 miner_hotkey: miner.hotkey.to_string(),
                 miner_endpoint: miner.endpoint.clone(),
+                stake_tao: miner.stake_tao,
+                is_validator: miner.is_validator,
                 verification_type: VerificationType::AutomatedWithSsh,
                 created_at: chrono::Utc::now(),
                 timeout: std::time::Duration::from_secs(300),
@@ -468,6 +483,8 @@ impl VerificationScheduler {
                 miner_uid: miners[0].uid.as_u16(),
                 miner_hotkey: miners[0].hotkey.to_string(),
                 miner_endpoint: miners[0].endpoint.clone(),
+                stake_tao: miners[0].stake_tao,
+                is_validator: miners[0].is_validator,
                 verification_type: VerificationType::AutomatedWithSsh,
                 created_at: chrono::Utc::now(),
                 timeout: std::time::Duration::from_secs(300),
@@ -571,6 +588,8 @@ pub struct VerificationTask {
     pub miner_uid: u16,
     pub miner_hotkey: String,
     pub miner_endpoint: String,
+    pub stake_tao: f64,
+    pub is_validator: bool,
     pub verification_type: VerificationType,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub timeout: std::time::Duration,

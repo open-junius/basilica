@@ -372,8 +372,8 @@ impl VerificationEngine {
             uid: MinerUid::new(task.miner_uid),
             hotkey,
             endpoint: task.miner_endpoint.clone(),
-            is_validator: false,
-            stake_tao: 0.0,
+            is_validator: task.is_validator,
+            stake_tao: task.stake_tao,
             last_verified: None,
             verification_score: overall_score,
         };
@@ -429,8 +429,8 @@ impl VerificationEngine {
             endpoint: task.miner_endpoint.clone(),
             last_verified: Some(task.created_at),
             verification_score: 0.0, // Will be updated after verification
-            is_validator: false,
-            stake_tao: 0.0,
+            is_validator: task.is_validator,
+            stake_tao: task.stake_tao,
         };
 
         // Execute verification with SSH automation
@@ -613,96 +613,6 @@ impl VerificationEngine {
         }
     }
 
-    async fn store_executor_verification_result(
-        &self,
-        miner_uid: u16,
-        executor_result: &ExecutorVerificationResult,
-    ) -> Result<()> {
-        info!(
-            "Storing executor verification result to database for miner {}, executor {}: score={:.2}",
-            miner_uid, executor_result.executor_id, executor_result.verification_score
-        );
-
-        // Create verification log entry for database storage
-        let verification_log = VerificationLog::new(
-            executor_result.executor_id.clone(),
-            self.validator_hotkey.to_string(),
-            "ssh_automation".to_string(),
-            executor_result.verification_score,
-            executor_result.ssh_connection_successful
-                && executor_result.binary_validation_successful,
-            serde_json::json!({
-                "miner_uid": miner_uid,
-                "executor_id": executor_result.executor_id,
-                "ssh_connection_successful": executor_result.ssh_connection_successful,
-                "binary_validation_successful": executor_result.binary_validation_successful,
-                "verification_method": "ssh_automation",
-                "executor_result": executor_result.executor_result,
-                "gpu_count": executor_result.gpu_count,
-                "score_details": {
-                    "verification_score": executor_result.verification_score,
-                    "ssh_score": if executor_result.ssh_connection_successful { 0.5 } else { 0.0 },
-                    "binary_score": if executor_result.binary_validation_successful { 0.5 } else { 0.0 }
-                }
-            }),
-            executor_result.execution_time.as_millis() as i64,
-            if !executor_result.ssh_connection_successful {
-                Some("SSH connection failed".to_string())
-            } else if !executor_result.binary_validation_successful {
-                Some("Binary validation failed".to_string())
-            } else {
-                None
-            },
-        );
-
-        // Store directly to database to avoid repository trait issues
-        let query = r#"
-            INSERT INTO verification_logs (
-                id, executor_id, validator_hotkey, verification_type, timestamp,
-                score, success, details, duration_ms, error_message, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        "#;
-
-        if let Err(e) = sqlx::query(query)
-            .bind(verification_log.id.to_string())
-            .bind(&verification_log.executor_id)
-            .bind(&verification_log.validator_hotkey)
-            .bind(&verification_log.verification_type)
-            .bind(verification_log.timestamp.to_rfc3339())
-            .bind(verification_log.score)
-            .bind(if verification_log.success { 1 } else { 0 })
-            .bind(serde_json::to_string(&verification_log.details).unwrap_or_default())
-            .bind(verification_log.duration_ms)
-            .bind(&verification_log.error_message)
-            .bind(verification_log.created_at.to_rfc3339())
-            .bind(verification_log.updated_at.to_rfc3339())
-            .execute(self.persistence.pool())
-            .await
-        {
-            error!(
-                "Failed to store executor verification result to database: {}",
-                e
-            );
-            return Err(anyhow::anyhow!("Database storage failed: {}", e));
-        }
-
-        // Ensure miner-executor relationship exists
-        if let Err(e) = self
-            .ensure_miner_executor_relationship(miner_uid, &executor_result.executor_id)
-            .await
-        {
-            warn!("Failed to ensure miner-executor relationship: {}", e);
-            // Don't fail the verification storage for this
-        }
-
-        info!(
-            "Executor verification result successfully stored to database for miner {}, executor {}: score={:.2}",
-            miner_uid, executor_result.executor_id, executor_result.verification_score
-        );
-
-        Ok(())
-    }
-
     /// Store executor verification result with actual miner information
     async fn store_executor_verification_result_with_miner_info(
         &self,
@@ -795,61 +705,6 @@ impl VerificationEngine {
             "Executor verification result successfully stored to database for miner {}, executor {}: score={:.2}",
             miner_uid, executor_result.executor_id, executor_result.verification_score
         );
-
-        Ok(())
-    }
-
-    /// Ensure miner-executor relationship exists in database for weight calculation
-    async fn ensure_miner_executor_relationship(
-        &self,
-        miner_uid: u16,
-        executor_id: &str,
-    ) -> Result<()> {
-        info!(
-            "Ensuring miner-executor relationship for miner {} and executor {}",
-            miner_uid, executor_id
-        );
-
-        let miner_id = format!("miner_{miner_uid}");
-
-        // Check if relationship already exists
-        let query =
-            "SELECT COUNT(*) as count FROM miner_executors WHERE miner_id = ? AND executor_id = ?";
-        let row = sqlx::query(query)
-            .bind(&miner_id)
-            .bind(executor_id)
-            .fetch_one(self.persistence.pool())
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to check miner-executor relationship: {}", e))?;
-
-        let count: i64 = row.get("count");
-
-        if count == 0 {
-            // Insert new relationship
-            let insert_query = r#"
-                INSERT OR IGNORE INTO miner_executors (miner_id, executor_id, created_at, updated_at)
-                VALUES (?, ?, datetime('now'), datetime('now'))
-            "#;
-
-            sqlx::query(insert_query)
-                .bind(&miner_id)
-                .bind(executor_id)
-                .execute(self.persistence.pool())
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!("Failed to insert miner-executor relationship: {}", e)
-                })?;
-
-            info!(
-                "Created miner-executor relationship: {} -> {}",
-                miner_id, executor_id
-            );
-        } else {
-            debug!(
-                "Miner-executor relationship already exists: {} -> {}",
-                miner_id, executor_id
-            );
-        }
 
         Ok(())
     }
@@ -990,6 +845,31 @@ impl VerificationEngine {
             debug!("Updated miner record: {} with latest data", miner_id);
         }
 
+        Ok(())
+    }
+
+    /// Sync miners from metagraph to database
+    pub async fn sync_miners_from_metagraph(&self, miners: &[MinerInfo]) -> Result<()> {
+        info!("Syncing {} miners from metagraph to database", miners.len());
+
+        for miner in miners {
+            // Discovery already filters out miners without valid axon endpoints
+            if let Err(e) = self.ensure_miner_exists_with_info(miner).await {
+                warn!(
+                    "Failed to sync miner {} to database: {}",
+                    miner.uid.as_u16(),
+                    e
+                );
+            } else {
+                debug!(
+                    "Successfully synced miner {} with endpoint {} to database",
+                    miner.uid.as_u16(),
+                    miner.endpoint
+                );
+            }
+        }
+
+        info!("Completed syncing miners from metagraph");
         Ok(())
     }
 
