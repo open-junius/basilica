@@ -138,6 +138,24 @@ impl ValidatorPrometheusMetrics {
             "GPU count per executor"
         );
 
+        // Weight metrics
+        describe_gauge!(
+            "basilica_validator_miner_weight",
+            "Weight assigned to each miner"
+        );
+
+        // Validation metrics
+        describe_counter!(
+            "basilica_validator_miner_successful_validations",
+            "Count of successful validations per miner"
+        );
+
+        // GPU profile metrics
+        describe_gauge!(
+            "basilica_validator_miner_gpu_profiles",
+            "GPU profiles for miners"
+        );
+
         Ok(Self {
             start_time: Instant::now(),
             last_collection: Arc::new(RwLock::new(SystemTime::now())),
@@ -257,7 +275,12 @@ impl ValidatorPrometheusMetrics {
     }
 
     /// Record GPU profile metrics for a miner
-    pub fn record_miner_gpu_profile(&self, miner_uid: u16, gpu_count: u32, weighted_score: f64) {
+    pub fn record_miner_gpu_count_and_score(
+        &self,
+        miner_uid: u16,
+        gpu_count: u32,
+        weighted_score: f64,
+    ) {
         gauge!("basilica_validator_miner_gpu_count", "miner_uid" => miner_uid.to_string())
             .set(gpu_count as f64);
         histogram!("basilica_validator_miner_gpu_weighted_score", "miner_uid" => miner_uid.to_string())
@@ -265,12 +288,52 @@ impl ValidatorPrometheusMetrics {
     }
 
     /// Record GPU count for an executor
-    pub fn record_executor_gpu_count(&self, executor_id: &str, gpu_model: &str, gpu_count: usize) {
+    pub fn record_executor_gpu_count(
+        &self,
+        miner_uid: u16,
+        executor_id: &str,
+        gpu_model: &str,
+        gpu_count: usize,
+    ) {
         gauge!("basilica_validator_executor_gpu_count",
+            "miner_uid" => miner_uid.to_string(),
             "executor_id" => executor_id.to_string(),
             "gpu_model" => gpu_model.to_string()
         )
         .set(gpu_count as f64);
+    }
+
+    /// Record weight assigned to a miner
+    pub fn record_miner_weight(&self, miner_uid: u16, weight: u16) {
+        gauge!("basilica_validator_miner_weight",
+            "miner_uid" => miner_uid.to_string()
+        )
+        .set(weight as f64);
+    }
+
+    /// Record successful validation for a miner
+    pub fn record_miner_successful_validation(&self, miner_uid: u16, executor_id: &str) {
+        counter!("basilica_validator_miner_successful_validations",
+            "miner_uid" => miner_uid.to_string(),
+            "executor_id" => executor_id.to_string()
+        )
+        .increment(1);
+    }
+
+    /// Record GPU profile for a miner
+    pub fn record_miner_gpu_profile(
+        &self,
+        miner_uid: u16,
+        gpu_profile: &str,
+        executor_id: &str,
+        count: u32,
+    ) {
+        gauge!("basilica_validator_miner_gpu_profiles",
+            "miner_uid" => miner_uid.to_string(),
+            "gpu_profile" => gpu_profile.to_string(),
+            "executor_id" => executor_id.to_string()
+        )
+        .set(count as f64);
     }
 
     /// Collect system metrics periodically

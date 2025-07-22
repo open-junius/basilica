@@ -95,7 +95,7 @@ impl ValidatorBusinessMetrics {
     ) {
         // Record executor GPU count in Prometheus
         self.prometheus
-            .record_executor_gpu_count(executor_id, gpu_model, gpu_count);
+            .record_executor_gpu_count(miner_uid, executor_id, gpu_model, gpu_count);
 
         // Record miner GPU metrics if validation successful
         if success {
@@ -113,8 +113,11 @@ impl ValidatorBusinessMetrics {
             };
 
             // Record miner GPU profile metrics
-            self.prometheus
-                .record_miner_gpu_profile(miner_uid, total_gpu_count, weighted_score);
+            self.prometheus.record_miner_gpu_count_and_score(
+                miner_uid,
+                total_gpu_count,
+                weighted_score,
+            );
         }
     }
 

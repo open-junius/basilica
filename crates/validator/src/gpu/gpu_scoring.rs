@@ -64,7 +64,7 @@ impl GpuScoringEngine {
         // Record metrics if available
         if let Some(metrics) = &self.metrics {
             // Record miner GPU profile metrics
-            metrics.prometheus().record_miner_gpu_profile(
+            metrics.prometheus().record_miner_gpu_count_and_score(
                 miner_uid.as_u16(),
                 profile.total_gpu_count(),
                 new_score,
@@ -74,9 +74,24 @@ impl GpuScoringEngine {
             for validation in &executor_validations {
                 if validation.is_valid && validation.attestation_valid {
                     metrics.prometheus().record_executor_gpu_count(
+                        miner_uid.as_u16(),
                         &validation.executor_id,
                         &validation.gpu_model,
                         validation.gpu_count,
+                    );
+
+                    // Record successful validation
+                    metrics.prometheus().record_miner_successful_validation(
+                        miner_uid.as_u16(),
+                        &validation.executor_id,
+                    );
+
+                    // Record GPU profile
+                    metrics.prometheus().record_miner_gpu_profile(
+                        miner_uid.as_u16(),
+                        &validation.gpu_model,
+                        &validation.executor_id,
+                        validation.gpu_count as u32,
                     );
 
                     // Also record through business metrics for complete tracking

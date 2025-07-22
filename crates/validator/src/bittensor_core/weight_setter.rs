@@ -7,6 +7,7 @@ use crate::bittensor_core::weight_allocation::WeightAllocationEngine;
 use crate::config::emission::EmissionConfig;
 use crate::gpu::categorization;
 use crate::gpu::GpuScoringEngine;
+use crate::metrics::ValidatorMetrics;
 use crate::persistence::entities::VerificationLog;
 use crate::persistence::gpu_profile_repository::GpuProfileRepository;
 use crate::persistence::SimplePersistence;
@@ -57,6 +58,7 @@ pub struct WeightSetter {
     weight_allocation_engine: Arc<WeightAllocationEngine>,
     emission_config: EmissionConfig,
     gpu_profile_repo: Arc<GpuProfileRepository>,
+    metrics: Option<Arc<ValidatorMetrics>>,
 }
 
 impl WeightSetter {
@@ -71,6 +73,33 @@ impl WeightSetter {
         gpu_scoring_engine: Arc<GpuScoringEngine>,
         emission_config: EmissionConfig,
         gpu_profile_repo: Arc<GpuProfileRepository>,
+    ) -> Result<Self> {
+        Self::with_metrics(
+            config,
+            bittensor_service,
+            storage,
+            persistence,
+            min_score_threshold,
+            blocks_per_weight_set,
+            gpu_scoring_engine,
+            emission_config,
+            gpu_profile_repo,
+            None,
+        )
+    }
+
+    /// Create a new WeightSetter instance with metrics support
+    pub fn with_metrics(
+        config: BittensorConfig,
+        bittensor_service: Arc<BittensorService>,
+        storage: MemoryStorage,
+        persistence: Arc<SimplePersistence>,
+        min_score_threshold: f64,
+        blocks_per_weight_set: u64,
+        gpu_scoring_engine: Arc<GpuScoringEngine>,
+        emission_config: EmissionConfig,
+        gpu_profile_repo: Arc<GpuProfileRepository>,
+        metrics: Option<Arc<ValidatorMetrics>>,
     ) -> Result<Self> {
         // Create weight allocation engine
         let weight_allocation_engine = Arc::new(WeightAllocationEngine::new(
@@ -90,6 +119,7 @@ impl WeightSetter {
             weight_allocation_engine,
             emission_config,
             gpu_profile_repo,
+            metrics,
         })
     }
 
@@ -488,6 +518,13 @@ impl WeightSetter {
                 netuid = self.config.netuid,
                 "Weight submission detail"
             );
+
+            // Record weight to metrics if available
+            if let Some(ref metrics) = self.metrics {
+                metrics
+                    .prometheus()
+                    .record_miner_weight(weight.uid, weight.weight);
+            }
         }
 
         // Create the payload using the provided function

@@ -338,7 +338,7 @@ async fn start_validator_services(
             Arc::new(crate::gpu::GpuScoringEngine::new(gpu_profile_repo.clone()))
         };
 
-        let weight_setter = crate::bittensor_core::WeightSetter::new(
+        let weight_setter = crate::bittensor_core::WeightSetter::with_metrics(
             config.bittensor.common.clone(),
             bittensor_service.clone(),
             storage.clone(),
@@ -348,6 +348,7 @@ async fn start_validator_services(
             gpu_scoring_engine,
             config.emission.clone(),
             gpu_profile_repo.clone(),
+            validator_metrics.as_ref().map(|m| Arc::new(m.clone())),
         )?;
         let weight_setter_arc = Arc::new(weight_setter);
 
