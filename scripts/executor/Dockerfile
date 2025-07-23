@@ -27,25 +27,20 @@ RUN cargo fetch
 # Build arguments
 ARG BUILD_MODE=release
 ARG FEATURES=""
-ARG BITTENSOR_NETWORK="test"
+ARG BITTENSOR_NETWORK="finney"
 ARG METADATA_CHAIN_ENDPOINT=""
 
-# Set environment variables for the build - default to test network if not specified
-ENV BITTENSOR_NETWORK=${BITTENSOR_NETWORK:-test}
+# Set environment variables for the build - default to finney network if not specified
+ENV BITTENSOR_NETWORK=${BITTENSOR_NETWORK:-finney}
 ENV METADATA_CHAIN_ENDPOINT=${METADATA_CHAIN_ENDPOINT}
 
 # Set environment variables to reduce build size and use less disk space
 ENV CARGO_TARGET_DIR=/tmp/target
 ENV CARGO_INCREMENTAL=0
 ENV RUST_BACKTRACE=1
-ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
-# Add retry configuration for network operations
+# Add retry configuration for network operations during build
 ENV CARGO_NET_RETRY=10
-ENV CARGO_HTTP_TIMEOUT=300
-ENV CARGO_NET_OFFLINE=false
-
-# Pre-download crabtensor metadata to avoid 503 errors during build
-RUN cargo metadata --format-version 1 > /dev/null 2>&1 || true
+ENV CARGO_HTTP_TIMEOUT=120
 
 # Build the executor directly (workspace should resolve dependencies)
 # Set explicit endpoint if network is specified but endpoint is not
