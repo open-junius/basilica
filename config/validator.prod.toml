@@ -109,5 +109,5 @@ weight_version_key = 0
 # are distributed across GPU categories
 # Must sum to exactly 100.0
 [emission.gpu_allocations]
-"H100" = 60.0
-"H200" = 40.0
+"H100" = 40.0
+"H200" = 60.0
