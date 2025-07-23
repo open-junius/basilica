@@ -395,14 +395,16 @@ impl VerificationEngine {
         executor_result: &ExecutorVerificationResult,
         miner_info: &super::types::MinerInfo,
     ) -> Result<()> {
+        let unique_executor_id = format!("miner{}__{}", miner_uid, executor_result.executor_id);
+
         info!(
-            "Storing executor verification result to database for miner {}, executor {}: score={:.2}",
-            miner_uid, executor_result.executor_id, executor_result.verification_score
+            "Storing executor verification result to database for miner {}, executor {} (unique: {}): score={:.2}",
+            miner_uid, executor_result.executor_id, unique_executor_id, executor_result.verification_score
         );
 
         // Create verification log entry for database storage
         let verification_log = VerificationLog::new(
-            executor_result.executor_id.clone(),
+            unique_executor_id.clone(),
             self.validator_hotkey.to_string(),
             "ssh_automation".to_string(),
             executor_result.verification_score,
@@ -410,7 +412,8 @@ impl VerificationEngine {
                 && executor_result.binary_validation_successful,
             serde_json::json!({
                 "miner_uid": miner_uid,
-                "executor_id": executor_result.executor_id,
+                "original_executor_id": executor_result.executor_id,
+                "unique_executor_id": unique_executor_id,
                 "ssh_connection_successful": executor_result.ssh_connection_successful,
                 "binary_validation_successful": executor_result.binary_validation_successful,
                 "verification_method": "ssh_automation",
@@ -467,7 +470,7 @@ impl VerificationEngine {
         if let Err(e) = self
             .ensure_miner_executor_relationship_with_info(
                 miner_uid,
-                &executor_result.executor_id,
+                &unique_executor_id,
                 miner_info,
             )
             .await
