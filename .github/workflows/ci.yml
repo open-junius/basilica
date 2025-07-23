@@ -206,7 +206,7 @@ jobs:
         run: |
           chmod +x scripts/executor/build.sh
           export VALIDATOR_PUBLIC_KEY=$(cat public_key.hex)
-          BITTENSOR_NETWORK=test VALIDATOR_PUBLIC_KEY=$VALIDATOR_PUBLIC_KEY ./scripts/executor/build.sh --no-extract
+          BITTENSOR_NETWORK=finney VALIDATOR_PUBLIC_KEY=$VALIDATOR_PUBLIC_KEY ./scripts/executor/build.sh --no-extract
 
   # Build and test validator
   build-validator:
@@ -320,7 +320,7 @@ jobs:
       - name: Test Docker build script
         run: |
           chmod +x scripts/miner/build.sh
-          BITTENSOR_NETWORK=test ./scripts/miner/build.sh --no-extract
+          BITTENSOR_NETWORK=finney ./scripts/miner/build.sh --no-extract
 
   # Build and test public-api
   build-public-api:
@@ -379,7 +379,7 @@ jobs:
       - name: Test Docker build script
         run: |
           chmod +x scripts/public-api/build.sh
-          BITTENSOR_NETWORK=test ./scripts/public-api/build.sh --no-extract
+          BITTENSOR_NETWORK=finney ./scripts/public-api/build.sh --no-extract
 
   # Final status check
   ci-success:
