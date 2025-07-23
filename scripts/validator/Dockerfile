@@ -34,6 +34,9 @@ ENV METADATA_CHAIN_ENDPOINT=${METADATA_CHAIN_ENDPOINT}
 ENV CARGO_TARGET_DIR=/tmp/target
 ENV CARGO_INCREMENTAL=0
 ENV RUST_BACKTRACE=1
+# Add retry configuration for network operations during build
+ENV CARGO_NET_RETRY=10
+ENV CARGO_HTTP_TIMEOUT=120
 
 # Build the validator directly (workspace should resolve dependencies)
 # Set explicit endpoint if network is specified but endpoint is not
