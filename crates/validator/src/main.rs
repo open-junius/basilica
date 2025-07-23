@@ -3,6 +3,7 @@
 //! Bittensor neuron for verifying and scoring miners/executors.
 
 use anyhow::Result;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod api;
 mod bittensor_core;
@@ -20,7 +21,17 @@ use cli::{Args, Cli};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
+    // Initialize tracing with structured fields
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::EnvFilter::from_default_env())
+        .with(
+            tracing_subscriber::fmt::layer(), // .with_target(true)
+                                              // .with_thread_ids(true)
+                                              // .with_thread_names(true)
+                                              // .with_file(true)
+                                              // .with_line_number(true),
+        )
+        .init();
 
     let args = Args::parse_args();
     let cli = Cli::new();

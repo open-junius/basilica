@@ -159,8 +159,12 @@ impl WeightSetter {
             // Check if it's time to set weights
             if current_block >= last_block + self.blocks_per_weight_set {
                 info!(
+                    current_block = current_block,
+                    last_block = last_block,
                     "Setting weights at block {} (last set at block {}, interval: {} blocks)",
-                    current_block, last_block, self.blocks_per_weight_set
+                    current_block,
+                    last_block,
+                    self.blocks_per_weight_set
                 );
 
                 // Atomic weight setting with proper persistence
@@ -171,14 +175,17 @@ impl WeightSetter {
                             Ok(()) => {
                                 *self.last_weight_set_block.lock().await = current_block;
                                 info!(
+                                    current_block = current_block,
                                     "Successfully set weights and updated persistence at block {}",
                                     current_block
                                 );
                             }
                             Err(e) => {
                                 error!(
+                                    current_block = current_block,
                                     "Weight setting succeeded but failed to persist block {}: {}",
-                                    current_block, e
+                                    current_block,
+                                    e
                                 );
                                 // Continue anyway - weight setting was successful
                                 *self.last_weight_set_block.lock().await = current_block;
@@ -186,13 +193,18 @@ impl WeightSetter {
                         }
                     }
                     Err(e) => {
-                        error!("Failed to set weights at block {}: {}", current_block, e);
+                        error!(
+                            current_block = current_block,
+                            "Failed to set weights at block {}: {}", current_block, e
+                        );
                         // Don't update last_weight_set_block on failure
                     }
                 }
             } else {
                 let blocks_remaining = last_block + self.blocks_per_weight_set - current_block;
                 debug!(
+                    current_block = current_block,
+                    last_block = last_block,
                     "Waiting to set weights: {} blocks remaining (current: {}, last: {}, interval: {})",
                     blocks_remaining, current_block, last_block, self.blocks_per_weight_set
                 );
@@ -281,19 +293,21 @@ impl WeightSetter {
         // 4. Log category allocations for transparency
         for (category, allocation) in &weight_distribution.category_allocations {
             info!(
-                "Category {}: {} miners, {:.2}% allocation, total score: {:.4}",
-                category,
-                allocation.miner_count,
-                allocation.allocation_percentage,
-                allocation.total_score
+                gpu_category = %category,
+                miner_count = allocation.miner_count,
+                allocation_percentage = allocation.allocation_percentage,
+                total_score = allocation.total_score,
+                "[WEIGHT_FLOW] GPU category allocation"
             );
         }
 
         // 5. Log burn allocation if present
         if let Some(burn_alloc) = &weight_distribution.burn_allocation {
             info!(
-                "Burn allocation: UID {}, weight {}, {:.2}%",
-                burn_alloc.uid, burn_alloc.weight, burn_alloc.percentage
+                miner_uid = burn_alloc.uid,
+                weight = burn_alloc.weight,
+                percentage = burn_alloc.percentage,
+                "[WEIGHT_FLOW] Burn allocation"
             );
         }
 
@@ -355,8 +369,10 @@ impl WeightSetter {
         );
         for (i, w) in weight_distribution.weights.iter().enumerate() {
             debug!(
-                "  Distribution weight {}: UID={}, weight={}",
-                i, w.uid, w.weight
+                miner_uid = w.uid,
+                weight = w.weight,
+                index = i,
+                "[WEIGHT_FLOW] Distribution weight"
             );
         }
 
@@ -372,8 +388,10 @@ impl WeightSetter {
         debug!("Built {} normalized weights", normalized_weights.len());
         for (i, w) in normalized_weights.iter().enumerate() {
             debug!(
-                "  Normalized weight {}: UID={}, weight={}",
-                i, w.uid, w.weight
+                miner_uid = w.uid,
+                weight = w.weight,
+                index = i,
+                "[WEIGHT_FLOW] Normalized weight"
             );
         }
 
@@ -393,9 +411,9 @@ impl WeightSetter {
         executor_validations: Vec<ExecutorValidationResult>,
     ) -> Result<()> {
         info!(
-            "Updating GPU profile for miner {} with {} validations",
-            miner_uid.as_u16(),
-            executor_validations.len()
+            miner_uid = miner_uid.as_u16(),
+            validation_count = executor_validations.len(),
+            "[WEIGHT_FLOW] Updating GPU profile for miner"
         );
 
         // Convert ExecutorValidationResult to the format expected by GPU scoring engine
@@ -403,8 +421,13 @@ impl WeightSetter {
             .into_iter()
             .map(|v| {
                 debug!(
-                    "Converting validation for executor {}: gpu_model={}, gpu_count={}, valid={}, attestation_valid={}",
-                    v.executor_id, v.gpu_model, v.gpu_count, v.is_valid, v.attestation_valid
+                    miner_uid = miner_uid.as_u16(),
+                    executor_id = %v.executor_id,
+                    gpu_model = %v.gpu_model,
+                    gpu_count = v.gpu_count,
+                    is_valid = v.is_valid,
+                    attestation_valid = v.attestation_valid,
+                    "[WEIGHT_FLOW] Converting validation for executor"
                 );
                 categorization::ExecutorValidationResult {
                     executor_id: v.executor_id.to_string(),
@@ -419,7 +442,8 @@ impl WeightSetter {
             .collect();
 
         info!(
-            "Calling GPU scoring engine for miner {} with {} converted validations",
+            miner_uid = miner_uid.as_u16(),
+            "[WEIGHT_FLOW] Calling GPU scoring engine for miner {} with {} converted validations",
             miner_uid.as_u16(),
             gpu_validations.len()
         );
@@ -432,6 +456,7 @@ impl WeightSetter {
         {
             Ok(profile) => {
                 info!(
+                    miner_uid = miner_uid.as_u16(),
                     "Successfully updated GPU profile for miner {}: gpu_model={}, total_gpus={}, score={:.4}, gpu_distribution={:?}",
                     miner_uid.as_u16(),
                     profile.primary_gpu_model,
@@ -442,6 +467,7 @@ impl WeightSetter {
             }
             Err(e) => {
                 error!(
+                    miner_uid = miner_uid.as_u16(),
                     "Failed to update GPU profile for miner {}: {}",
                     miner_uid.as_u16(),
                     e
@@ -513,7 +539,7 @@ impl WeightSetter {
         // Log individual weights at debug level for troubleshooting
         for weight in &normalized_weights {
             debug!(
-                uid = weight.uid,
+                miner_uid = weight.uid,
                 weight = weight.weight,
                 netuid = self.config.netuid,
                 "Weight submission detail"
@@ -564,11 +590,16 @@ impl WeightSetter {
                     "Failed to submit weights to chain"
                 );
 
+                let uid_list: Vec<u16> = normalized_weights.iter().map(|w| w.uid).collect();
+
                 Err(anyhow::anyhow!(
                     "Weight submission failed ({}): {} - Context: {}",
                     error_context,
                     e,
-                    self.format_submission_context(&normalized_weights, version_key)
+                    format!(
+                        "netuid={}, version_key={}, uids={:?}",
+                        self.config.netuid, version_key, uid_list
+                    )
                 ))
             }
         }
@@ -583,8 +614,8 @@ impl WeightSetter {
         debug!("Validating {} weights before submission:", weights.len());
         for (i, weight) in weights.iter().enumerate() {
             debug!(
-                "  Weight {}: UID={}, weight={}",
-                i, weight.uid, weight.weight
+                miner_uid = weight.uid,
+                "  Weight {}: UID={}, weight={}", i, weight.uid, weight.weight
             );
         }
 
@@ -592,8 +623,8 @@ impl WeightSetter {
         for weight in weights {
             if !seen_uids.insert(weight.uid) {
                 error!(
-                    "Duplicate UID {} detected in weights: {:?}",
-                    weight.uid, weights
+                    miner_uid = weight.uid,
+                    "Duplicate UID {} detected in weights: {:?}", weight.uid, weights
                 );
                 return Err(anyhow::anyhow!("Duplicate UID {} in weights", weight.uid));
             }
@@ -628,15 +659,6 @@ impl WeightSetter {
         } else {
             "Unknown"
         }
-    }
-
-    /// Format submission context for error reporting
-    fn format_submission_context(&self, weights: &[NormalizedWeight], version_key: u64) -> String {
-        let uid_list: Vec<u16> = weights.iter().map(|w| w.uid).collect();
-        format!(
-            "netuid={}, version_key={}, uids={:?}",
-            self.config.netuid, version_key, uid_list
-        )
     }
 
     /// Get version key for weight setting

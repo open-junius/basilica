@@ -47,40 +47,6 @@ pub struct VerificationEngine {
 }
 
 impl VerificationEngine {
-    pub fn new(_config: VerificationConfig) -> Self {
-        warn!("Creating VerificationEngine without persistence - database storage will not be available");
-        panic!(
-            "VerificationEngine requires database persistence - use new_with_persistence() instead"
-        )
-    }
-
-    pub fn new_with_persistence(
-        config: VerificationConfig,
-        persistence: Arc<SimplePersistence>,
-    ) -> Self {
-        warn!("Creating VerificationEngine without validator hotkey - dynamic discovery will not be available");
-        Self {
-            config: config.clone(),
-            miner_client_config: MinerClientConfig {
-                timeout: config.discovery_timeout,
-                grpc_port_offset: config.grpc_port_offset,
-                ..Default::default()
-            },
-            validator_hotkey: Hotkey::new(
-                "5DAAnrj7VHTznn2AWBemMuyBwZWs6FNFjdyVXUeYum3PTXFy".to_string(),
-            )
-            .unwrap(),
-            ssh_client: Arc::new(ValidatorSshClient::new()),
-            persistence,
-            use_dynamic_discovery: false, // Disabled without proper initialization
-            ssh_key_path: None,
-            miner_endpoints: Arc::new(RwLock::new(HashMap::new())),
-            bittensor_service: None,
-            ssh_key_manager: None,
-            active_ssh_sessions: Arc::new(Mutex::new(HashSet::new())),
-        }
-    }
-
     /// Check if an endpoint is invalid
     fn is_invalid_endpoint(&self, endpoint: &str) -> bool {
         // Check for common invalid patterns
@@ -113,172 +79,10 @@ impl VerificationEngine {
         false
     }
 
-    /// Initiate automated SSH session setup with miner during discovery handshake
-    pub async fn initiate_discovery_ssh_handshake(
-        &self,
-        miner: &MinerInfo,
-        executors: &[ExecutorInfo],
-    ) -> Result<()> {
-        if !self.use_dynamic_discovery {
-            info!(
-                "Dynamic discovery disabled, skipping SSH handshake for miner {}",
-                miner.uid.as_u16()
-            );
-            return Ok(());
-        }
-
-        let ssh_key_manager = match &self.ssh_key_manager {
-            Some(manager) => manager,
-            None => {
-                warn!(
-                    "No SSH key manager available for discovery handshake with miner {}",
-                    miner.uid.as_u16()
-                );
-                return Ok(());
-            }
-        };
-
-        info!(
-            "Initiating SSH discovery handshake with miner {} for {} executors",
-            miner.uid.as_u16(),
-            executors.len()
-        );
-
-        // Create authenticated miner client
-        let client = self.create_authenticated_client()?;
-        let mut connection = client
-            .connect_and_authenticate(&miner.endpoint)
-            .await
-            .context("Failed to connect to miner for SSH handshake")?;
-
-        // Process each executor for SSH key distribution
-        for executor in executors {
-            if let Err(e) = self
-                .setup_executor_ssh_access(&mut connection, executor, ssh_key_manager)
-                .await
-            {
-                error!(
-                    "Failed to setup SSH access for executor {}: {}",
-                    executor.id, e
-                );
-            }
-        }
-
-        info!(
-            "Completed SSH discovery handshake with miner {}",
-            miner.uid.as_u16()
-        );
-        Ok(())
-    }
-
-    /// Setup SSH access for a specific executor during discovery
-    async fn setup_executor_ssh_access(
-        &self,
-        connection: &mut super::miner_client::AuthenticatedMinerConnection,
-        executor: &ExecutorInfo,
-        ssh_key_manager: &ValidatorSshKeyManager,
-    ) -> Result<()> {
-        // Use persistent SSH key instead of generating new session keys
-        let session_id = Uuid::new_v4().to_string();
-        let (public_key_openssh, _key_path) = match ssh_key_manager.get_persistent_key() {
-            Some((public_key, private_key_path)) => {
-                info!("Using persistent SSH key for executor {}", executor.id);
-                (public_key.clone(), private_key_path.clone())
-            }
-            None => {
-                error!(
-                    "No persistent SSH key available for executor {}",
-                    executor.id
-                );
-                return Err(anyhow::anyhow!("No persistent SSH key available"));
-            }
-        };
-
-        // Request SSH session setup with validator's public key
-        let session_request = InitiateSshSessionRequest {
-            validator_hotkey: self.validator_hotkey.to_string(),
-            executor_id: executor.id.to_string(),
-            purpose: "discovery_handshake".to_string(),
-            validator_public_key: public_key_openssh,
-            session_duration_secs: 86400, // 24 hours for discovery sessions
-            session_metadata: serde_json::json!({
-                "validator_version": env!("CARGO_PKG_VERSION"),
-                "handshake_type": "discovery",
-                "session_id": session_id
-            })
-            .to_string(),
-        };
-
-        match connection.initiate_ssh_session_v2(session_request).await {
-            Ok(response) => {
-                if response.status() == SshSessionStatus::Active {
-                    info!(
-                        "Successfully setup SSH access for executor {} (session: {})",
-                        executor.id, response.session_id
-                    );
-                } else {
-                    warn!(
-                        "SSH session setup incomplete for executor {}: status={:?}",
-                        executor.id, response.status
-                    );
-                }
-            }
-            Err(e) => {
-                error!(
-                    "Failed SSH session setup for executor {}: {}",
-                    executor.id, e
-                );
-                return Err(e);
-            }
-        }
-
-        Ok(())
-    }
-
     /// Check if this verification engine supports batch processing
     pub fn supports_batch_processing(&self) -> bool {
         // Automated SSH verification supports batch processing when properly configured
         self.use_dynamic_discovery && self.ssh_key_manager.is_some()
-    }
-
-    /// Execute automated verification workflow for discovered miners (legacy batch method)
-    pub async fn execute_automated_verification_workflow_batch(
-        &self,
-        miners: &[MinerInfo],
-    ) -> Result<HashMap<MinerUid, f64>> {
-        let mut results = HashMap::new();
-
-        info!(
-            "Starting automated verification workflow for {} miners",
-            miners.len()
-        );
-
-        for miner in miners {
-            match self.verify_miner_with_ssh_automation(miner).await {
-                Ok(score) => {
-                    results.insert(miner.uid, score);
-                    info!(
-                        "Automated verification completed for miner {} with score: {:.4}",
-                        miner.uid.as_u16(),
-                        score
-                    );
-                }
-                Err(e) => {
-                    results.insert(miner.uid, 0.0);
-                    error!(
-                        "Automated verification failed for miner {}: {}",
-                        miner.uid.as_u16(),
-                        e
-                    );
-                }
-            }
-        }
-
-        info!(
-            "Completed automated verification workflow for {} miners",
-            miners.len()
-        );
-        Ok(results)
     }
 
     /// Execute complete automated verification workflow with SSH session management (specs-compliant)
@@ -323,12 +127,24 @@ impl VerificationEngine {
         let mut executor_results = Vec::new();
 
         for executor_info in executor_list {
+            info!(
+                miner_uid = task.miner_uid,
+                executor_id = %executor_info.id,
+                "[EVAL_FLOW] Starting SSH verification for executor"
+            );
+
             match self
                 .verify_executor_with_ssh_automation_enhanced(&task.miner_endpoint, &executor_info)
                 .await
             {
                 Ok(result) => {
                     let score = result.verification_score;
+                    info!(
+                        miner_uid = task.miner_uid,
+                        executor_id = %executor_info.id,
+                        verification_score = score,
+                        "[EVAL_FLOW] SSH verification completed"
+                    );
                     executor_results.push(result);
                     verification_steps.push(VerificationStep {
                         step_name: format!("ssh_verification_{}", executor_info.id),
@@ -339,8 +155,10 @@ impl VerificationEngine {
                 }
                 Err(e) => {
                     error!(
-                        "SSH verification failed for executor {}: {}",
-                        executor_info.id, e
+                        miner_uid = task.miner_uid,
+                        executor_id = %executor_info.id,
+                        error = %e,
+                        "[EVAL_FLOW] SSH verification failed"
                     );
                     verification_steps.push(VerificationStep {
                         step_name: format!("ssh_verification_{}", executor_info.id),
@@ -408,49 +226,6 @@ impl VerificationEngine {
             completed_at: chrono::Utc::now(),
             error: None,
         })
-    }
-
-    /// Execute automated verification workflow with task structure for enhanced scheduler integration
-    pub async fn execute_automated_verification_workflow_with_task(
-        &self,
-        task: &super::scheduler::VerificationTask,
-    ) -> Result<VerificationResult> {
-        info!(
-            "Starting task-based automated verification for miner UID: {}",
-            task.miner_uid
-        );
-
-        // Convert task into MinerInfo structure for existing workflow
-        let miner_info = super::types::MinerInfo {
-            uid: MinerUid::from(task.miner_uid),
-            hotkey: Hotkey::new(task.miner_hotkey.clone()).unwrap_or_else(|_| {
-                Hotkey::new("5DAAnrj7VHTznn2AWBemMuyBwZWs6FNFjdyVXUeYum3PTXFy".to_string()).unwrap()
-            }),
-            endpoint: task.miner_endpoint.clone(),
-            last_verified: Some(task.created_at),
-            verification_score: 0.0, // Will be updated after verification
-            is_validator: task.is_validator,
-            stake_tao: task.stake_tao,
-        };
-
-        // Execute verification with SSH automation
-        let score = self.verify_miner_with_ssh_automation(&miner_info).await?;
-
-        // Create verification result with additional metadata
-        let result = VerificationResult {
-            miner_uid: task.miner_uid,
-            overall_score: score,
-            verification_steps: vec![], // Empty for simplified workflow
-            completed_at: chrono::Utc::now(),
-            error: None,
-        };
-
-        info!(
-            "Task-based verification completed for miner {} with score: {:.4}",
-            task.miner_uid, score
-        );
-
-        Ok(result)
     }
 
     /// Discover executors from miner via gRPC
@@ -717,8 +492,11 @@ impl VerificationEngine {
         miner_info: &super::types::MinerInfo,
     ) -> Result<()> {
         info!(
+            miner_uid = miner_uid,
+            executor_id = executor_id,
             "Ensuring miner-executor relationship for miner {} and executor {} with real data",
-            miner_uid, executor_id
+            miner_uid,
+            executor_id
         );
 
         let miner_id = format!("miner_{miner_uid}");
@@ -768,13 +546,20 @@ impl VerificationEngine {
                 })?;
 
             info!(
+                miner_uid = miner_uid,
+                executor_id = executor_id,
                 "Created miner-executor relationship: {} -> {} with endpoint {}",
-                miner_id, executor_id, miner_info.endpoint
+                miner_id,
+                executor_id,
+                miner_info.endpoint
             );
         } else {
             debug!(
+                miner_uid = miner_uid,
+                executor_id = executor_id,
                 "Miner-executor relationship already exists: {} -> {}",
-                miner_id, executor_id
+                miner_id,
+                executor_id
             );
         }
 
@@ -1091,160 +876,6 @@ impl VerificationEngine {
 
         info!("Completed syncing miners from metagraph");
         Ok(())
-    }
-
-    /// Verify miner with full SSH automation including discovery handshake
-    async fn verify_miner_with_ssh_automation(
-        &self,
-        miner: &super::types::MinerInfo,
-    ) -> Result<f64> {
-        info!(
-            "Starting SSH-automated verification for miner {}",
-            miner.uid.as_u16()
-        );
-
-        // Step 1: Connect to miner and discover executors
-        let executor_list = self.discover_miner_executors(&miner.endpoint).await?;
-
-        if executor_list.is_empty() {
-            warn!("No executors available from miner {}", miner.uid.as_u16());
-            return Ok(0.0);
-        }
-
-        // Step 2: Execute verification on each executor
-        let mut executor_results = Vec::new();
-
-        for executor_info in executor_list {
-            match self
-                .verify_executor_with_ssh_automation_enhanced(&miner.endpoint, &executor_info)
-                .await
-            {
-                Ok(result) => {
-                    executor_results.push(result);
-                }
-                Err(e) => {
-                    error!(
-                        "SSH verification failed for executor {}: {}",
-                        executor_info.id, e
-                    );
-                }
-            }
-        }
-
-        // Step 3: Calculate overall score
-        let final_score = if executor_results.is_empty() {
-            0.0
-        } else {
-            executor_results
-                .iter()
-                .map(|r| r.verification_score)
-                .sum::<f64>()
-                / executor_results.len() as f64
-        };
-
-        info!(
-            "SSH-automated verification completed for miner {} with final score: {:.4}",
-            miner.uid.as_u16(),
-            final_score
-        );
-
-        Ok(final_score)
-    }
-
-    /// Create with full configuration for dynamic discovery
-    pub fn with_validator_context(
-        config: VerificationConfig,
-        validator_hotkey: Hotkey,
-        ssh_client: Arc<ValidatorSshClient>,
-        ssh_key_path: Option<PathBuf>,
-        persistence: Arc<SimplePersistence>,
-    ) -> Self {
-        let miner_client_config = MinerClientConfig {
-            timeout: config.discovery_timeout,
-            max_retries: 3,
-            grpc_port_offset: config.grpc_port_offset,
-            use_tls: false,
-        };
-
-        Self {
-            config: config.clone(),
-            miner_client_config,
-            validator_hotkey,
-            ssh_client,
-            persistence,
-            use_dynamic_discovery: config.use_dynamic_discovery,
-            ssh_key_path,
-            miner_endpoints: Arc::new(RwLock::new(HashMap::new())),
-            bittensor_service: None,
-            ssh_key_manager: None,
-            active_ssh_sessions: Arc::new(Mutex::new(HashSet::new())),
-        }
-    }
-
-    /// Create with full configuration including SSH key manager
-    pub async fn with_ssh_key_manager(
-        config: VerificationConfig,
-        validator_hotkey: Hotkey,
-        ssh_client: Arc<ValidatorSshClient>,
-        ssh_key_manager: Arc<ValidatorSshKeyManager>,
-        persistence: Arc<SimplePersistence>,
-    ) -> Result<Self> {
-        let miner_client_config = MinerClientConfig {
-            timeout: config.discovery_timeout,
-            max_retries: 3,
-            grpc_port_offset: config.grpc_port_offset,
-            use_tls: false,
-        };
-
-        Ok(Self {
-            config: config.clone(),
-            miner_client_config,
-            validator_hotkey,
-            ssh_client,
-            persistence,
-            use_dynamic_discovery: config.use_dynamic_discovery,
-            ssh_key_path: None,
-            miner_endpoints: Arc::new(RwLock::new(HashMap::new())),
-            bittensor_service: None,
-            ssh_key_manager: Some(ssh_key_manager),
-            active_ssh_sessions: Arc::new(Mutex::new(HashSet::new())),
-        })
-    }
-
-    /// Create with full configuration including Bittensor service for signing
-    pub fn with_bittensor_service(
-        config: VerificationConfig,
-        bittensor_service: Arc<bittensor::Service>,
-        ssh_client: Arc<ValidatorSshClient>,
-        ssh_key_path: Option<PathBuf>,
-        persistence: Arc<SimplePersistence>,
-    ) -> anyhow::Result<Self> {
-        let validator_hotkey = bittensor::account_id_to_hotkey(bittensor_service.get_account_id())
-            .map_err(|e| anyhow::anyhow!("Failed to convert account ID to hotkey: {}", e))?;
-
-        let miner_client_config = MinerClientConfig {
-            timeout: config.discovery_timeout,
-            max_retries: 3,
-            grpc_port_offset: config.grpc_port_offset,
-            use_tls: false,
-        };
-
-        // Initialize SSH key manager with validator configuration (will be created later if needed)
-        let ssh_key_manager = None;
-
-        Ok(Self {
-            config: config.clone(),
-            miner_client_config,
-            validator_hotkey,
-            ssh_client,
-            persistence,
-            use_dynamic_discovery: config.use_dynamic_discovery,
-            ssh_key_path,
-            miner_endpoints: Arc::new(RwLock::new(HashMap::new())),
-            bittensor_service: Some(bittensor_service),
-            ssh_key_manager,
-            active_ssh_sessions: Arc::new(Mutex::new(HashSet::new())),
-        })
     }
 
     /// Verify all executors for a specific miner
@@ -1782,7 +1413,11 @@ impl VerificationEngine {
         ssh_details: &SshConnectionDetails,
         _session_info: &protocol::miner_discovery::InitiateSshSessionResponse,
     ) -> Result<crate::validation::types::ValidatorBinaryOutput> {
-        info!("[EVAL_FLOW] Starting binary validation process");
+        info!(
+            ssh_host = %ssh_details.host,
+            ssh_port = ssh_details.port,
+            "[EVAL_FLOW] Starting binary validation process"
+        );
 
         let binary_config = &self.config.binary_validation;
 
@@ -1794,8 +1429,10 @@ impl VerificationEngine {
         let execution_duration = execution_start.elapsed();
 
         info!(
-            "[EVAL_FLOW] Validator binary executed in {:?}",
-            execution_duration
+            ssh_host = %ssh_details.host,
+            ssh_port = ssh_details.port,
+            execution_duration = ?execution_duration,
+            "[EVAL_FLOW] Validator binary executed"
         );
 
         // Parse and validate output
@@ -1820,7 +1457,11 @@ impl VerificationEngine {
         ssh_details: &SshConnectionDetails,
         binary_config: &crate::config::BinaryValidationConfig,
     ) -> Result<Vec<u8>> {
-        info!("[EVAL_FLOW] Executing validator binary locally");
+        info!(
+            ssh_host = %ssh_details.host,
+            ssh_port = ssh_details.port,
+            "[EVAL_FLOW] Executing validator binary locally"
+        );
 
         let mut command = tokio::process::Command::new(&binary_config.validator_binary_path);
 
@@ -1849,12 +1490,20 @@ impl VerificationEngine {
 
         // Debug: log the complete command being executed
         debug!("[EVAL_FLOW] Executing command: {:?}", command);
-        info!("[EVAL_FLOW] Command args: validator_binary_path={:?}, ssh_host={}, ssh_port={}, ssh_user={}, ssh_key={:?}, executor_binary_path={:?}, output_format={}, timeout={}",
-              binary_config.validator_binary_path, ssh_details.host, ssh_details.port, ssh_details.username,
-              ssh_details.private_key_path, binary_config.executor_binary_path, binary_config.output_format, binary_config.execution_timeout_secs);
-        info!("[EVAL_FLOW] Environment variables: BAS_MATRIX_SIZE=1024");
+        info!(
+            ssh_host = %ssh_details.host,
+            ssh_port = ssh_details.port,
+            ssh_user = %ssh_details.username,
+            validator_binary_path = ?binary_config.validator_binary_path,
+            executor_binary_path = ?binary_config.executor_binary_path,
+            timeout = binary_config.execution_timeout_secs,
+            "[EVAL_FLOW] Validator binary command configured"
+        );
 
         info!(
+            ssh_host = %ssh_details.host,
+            ssh_port = ssh_details.port,
+            ssh_user = %ssh_details.username,
             "[EVAL_FLOW] Starting validator binary execution with timeout {}s",
             timeout_duration.as_secs()
         );
@@ -1864,6 +1513,9 @@ impl VerificationEngine {
             .await
             .map_err(|_| {
                 error!(
+                    ssh_host = %ssh_details.host,
+                    ssh_port = ssh_details.port,
+                    ssh_user = %ssh_details.username,
                     "[EVAL_FLOW] Validator binary execution timed out after {}s",
                     timeout_duration.as_secs()
                 );
@@ -1891,7 +1543,10 @@ impl VerificationEngine {
         let stderr_str = String::from_utf8_lossy(&output.stderr);
 
         if !stdout_str.is_empty() {
-            info!("[EVAL_FLOW] Validator binary stdout: {}", stdout_str);
+            info!(
+                stdout_length = stdout_str.len(),
+                "[EVAL_FLOW] Validator binary stdout: {}", stdout_str
+            );
         }
 
         if !stderr_str.is_empty() {
@@ -1901,7 +1556,10 @@ impl VerificationEngine {
                     stderr_str
                 );
             } else {
-                error!("[EVAL_FLOW] Validator binary stderr: {}", stderr_str);
+                error!(
+                    stderr = %stderr_str,
+                    "[EVAL_FLOW] Validator binary stderr"
+                );
             }
         }
 
@@ -2738,8 +2396,9 @@ impl VerificationEngine {
         executor_info: &ExecutorInfoDetailed,
     ) -> Result<ExecutorVerificationResult> {
         info!(
-            "[EVAL_FLOW] Starting enhanced SSH automation verification for executor {} via miner {}",
-            executor_info.id, miner_endpoint
+            executor_id = %executor_info.id,
+            miner_endpoint = %miner_endpoint,
+            "[EVAL_FLOW] Starting enhanced SSH automation verification"
         );
 
         let total_start = std::time::Instant::now();
@@ -2787,16 +2446,23 @@ impl VerificationEngine {
             let after_count = active_sessions.len();
 
             if inserted {
-                info!("[EVAL_FLOW] SSH session registered successfully for executor {} - Sessions: {} -> {} (added: {})",
-                      executor_info.id, before_count, after_count, executor_info.id);
+                info!(
+                    executor_id = %executor_info.id,
+                    sessions_before = before_count,
+                    sessions_after = after_count,
+                    "[EVAL_FLOW] SSH session registered successfully"
+                );
             } else {
-                warn!("[EVAL_FLOW] SSH session already existed for executor {} during registration - this should not happen",
-                      executor_info.id);
+                warn!(
+                    executor_id = %executor_info.id,
+                    "[EVAL_FLOW] SSH session already existed during registration - this should not happen"
+                );
             }
 
             debug!(
-                "[EVAL_FLOW] Current active SSH sessions after registration: {:?}",
-                active_sessions.iter().collect::<Vec<_>>()
+                executor_id = %executor_info.id,
+                active_sessions = ?active_sessions.iter().collect::<Vec<_>>(),
+                "[EVAL_FLOW] Current active SSH sessions after registration"
             );
         }
 
@@ -2824,23 +2490,24 @@ impl VerificationEngine {
 
         // Phase 1: SSH Connection Test (existing implementation)
         info!(
-            "[EVAL_FLOW] Phase 1: SSH connection test for executor {}",
-            executor_info.id
+            executor_id = %executor_info.id,
+            "[EVAL_FLOW] Phase 1: SSH connection test"
         );
         let ssh_test_start = std::time::Instant::now();
 
         let ssh_connection_successful = match self.test_ssh_connection(&ssh_details).await {
             Ok(_) => {
                 info!(
-                    "[EVAL_FLOW] SSH connection test successful for executor {}",
-                    executor_info.id
+                    executor_id = %executor_info.id,
+                    "[EVAL_FLOW] SSH connection test successful"
                 );
                 true
             }
             Err(e) => {
                 error!(
-                    "[EVAL_FLOW] SSH connection test failed for executor {}: {}",
-                    executor_info.id, e
+                    executor_id = %executor_info.id,
+                    error = %e,
+                    "[EVAL_FLOW] SSH connection test failed"
                 );
                 false
             }
@@ -2856,14 +2523,19 @@ impl VerificationEngine {
         let mut gpu_count = 0u64;
 
         info!(
-            "[EVAL_FLOW] Binary validation config check for executor {}: ssh_successful={}, enabled={}, validator_binary_path={:?}",
-            executor_info.id, ssh_connection_successful, self.config.binary_validation.enabled, self.config.binary_validation.validator_binary_path
+            executor_id = %executor_info.id,
+            ssh_successful = ssh_connection_successful,
+            binary_validation_enabled = self.config.binary_validation.enabled,
+            validator_binary_path = ?self.config.binary_validation.validator_binary_path,
+            "[EVAL_FLOW] Binary validation config check"
         );
 
         if ssh_connection_successful && self.config.binary_validation.enabled {
             info!(
-                "[EVAL_FLOW] Phase 2: Binary validation for executor {}",
-                executor_info.id
+                executor_id = %executor_info.id,
+                ssh_host = %ssh_details.host,
+                ssh_port = ssh_details.port,
+                "[EVAL_FLOW] Phase 2: Binary validation"
             );
 
             match self
@@ -2880,14 +2552,18 @@ impl VerificationEngine {
                         Duration::from_millis(binary_result.execution_time_ms);
 
                     info!(
-                        "[EVAL_FLOW] Binary validation completed for executor {} - success: {}, score: {:.2}",
-                        executor_info.id, binary_validation_successful, binary_score
+                        executor_id = %executor_info.id,
+                        binary_validation_successful = binary_validation_successful,
+                        binary_score = binary_score,
+                        gpu_count = gpu_count,
+                        "[EVAL_FLOW] Binary validation completed"
                     );
                 }
                 Err(e) => {
                     error!(
-                        "[EVAL_FLOW] Binary validation failed for executor {}: {}",
-                        executor_info.id, e
+                        executor_id = %executor_info.id,
+                        error = %e,
+                        "[EVAL_FLOW] Binary validation failed"
                     );
                     binary_validation_successful = false;
                     binary_score = 0.0;
@@ -2895,8 +2571,8 @@ impl VerificationEngine {
             }
         } else if !self.config.binary_validation.enabled {
             info!(
-                "[EVAL_FLOW] Binary validation disabled for executor {}",
-                executor_info.id
+                executor_id = %executor_info.id,
+                "[EVAL_FLOW] Binary validation disabled"
             );
             binary_validation_successful = true; // Not required
             binary_score = 0.8; // Default score when disabled
@@ -2916,17 +2592,22 @@ impl VerificationEngine {
 
         // Phase 4: Session and Resource Cleanup
         info!(
-            "[EVAL_FLOW] Phase 4: Starting cleanup for executor {} - Duration: {:.2}s",
-            executor_info.id,
-            total_start.elapsed().as_secs_f64()
+            executor_id = %executor_info.id,
+            duration_secs = total_start.elapsed().as_secs_f64(),
+            "[EVAL_FLOW] Phase 4: Starting cleanup"
         );
 
         self.cleanup_ssh_session(&session_info).await;
         self.cleanup_active_session(&executor_info.id).await;
 
         info!(
-            "[EVAL_FLOW] Enhanced verification completed for executor {} - SSH: {}, Binary: {}, Combined: {:.2}, Duration: {:.2}s",
-            executor_info.id, ssh_connection_successful, binary_validation_successful, combined_score, total_start.elapsed().as_secs_f64()
+            executor_id = %executor_info.id,
+            ssh_successful = ssh_connection_successful,
+            binary_successful = binary_validation_successful,
+            combined_score = combined_score,
+            duration_secs = total_start.elapsed().as_secs_f64(),
+            gpu_count = gpu_count,
+            "[EVAL_FLOW] Enhanced verification completed"
         );
 
         Ok(ExecutorVerificationResult {

@@ -71,7 +71,7 @@ loki.process "filter_and_label" {
 }
 
 loki.process "extract_validator_level" {
-  forward_to = [loki.write.default.receiver]
+  forward_to = [loki.process.extract_context_fields.receiver]
 
   // Extract log level and target from all logs
   stage.regex {
@@ -169,6 +169,41 @@ loki.process "file_processor" {
       validator_uid = env("VALIDATOR_UID"),
       netuid = env("NETUID"),
       external_ip = env("VALIDATOR_IP"),
+    }
+  }
+}
+
+// Extract miner_uid and executor_id from structured log fields
+loki.process "extract_context_fields" {
+  forward_to = [loki.write.default.receiver]
+
+  // Extract miner_uid from structured fields (e.g., "miner_uid = 123")
+  stage.regex {
+    expression = `miner_uid\s*=\s*(?P<miner_uid>\d+)`
+  }
+
+  // Extract executor_id from structured fields (UUID format: "executor_id = 550e8400-e29b-41d4-a716-446655440000")
+  stage.regex {
+    expression = `executor_id\s*=\s*(?P<executor_id>[a-fA-F0-9-]{36})`
+  }
+
+  // Extract gpu_category from structured fields (e.g., "gpu_category = H100")
+  stage.regex {
+    expression = `gpu_category\s*=\s*(?P<gpu_category>[\w]+)`
+  }
+
+  // Extract flow type from brackets (e.g., "[EVAL_FLOW]")
+  stage.regex {
+    expression = `\[(?P<flow>(EVAL_FLOW|WEIGHT_FLOW|SCORING_FLOW))\]`
+  }
+
+  // Apply all extracted fields as labels for Loki queries
+  stage.labels {
+    values = {
+      miner_uid = "miner_uid",
+      executor_id = "executor_id",
+      gpu_category = "gpu_category",
+      flow = "flow",
     }
   }
 }
