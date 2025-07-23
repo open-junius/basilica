@@ -23,8 +23,8 @@ The system recognizes three GPU categories, but only two are eligible for reward
 Based on the emission configuration, the weight pool is distributed as follows:
 
 - **Burn**: 95% of the total weight allocation is sent to a burn address to maintain network economics.
-- **H100**: 60% of total **available** weight allocation
-- **H200**: 40% of total **available** weight allocation
+- **H100**: 40% of total **available** weight allocation
+- **H200**: 60% of total **available** weight allocation
 
 ## Scoring Formula
 

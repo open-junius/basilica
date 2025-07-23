@@ -386,8 +386,8 @@ mod tests {
 
     fn create_test_config() -> EmissionConfig {
         let mut gpu_allocations = HashMap::new();
-        gpu_allocations.insert("H100".to_string(), 60.0);
-        gpu_allocations.insert("H200".to_string(), 40.0);
+        gpu_allocations.insert("H100".to_string(), 40.0);
+        gpu_allocations.insert("H200".to_string(), 60.0);
 
         EmissionConfig {
             burn_percentage: 10.0,
@@ -586,8 +586,8 @@ mod tests {
         let h100_allocation = distribution.category_allocations.get("H100").unwrap();
         let h200_allocation = distribution.category_allocations.get("H200").unwrap();
 
-        assert!((h100_allocation.allocation_percentage - 60.0).abs() < 0.1);
-        assert!((h200_allocation.allocation_percentage - 40.0).abs() < 0.1);
+        assert!((h100_allocation.allocation_percentage - 40.0).abs() < 0.1);
+        assert!((h200_allocation.allocation_percentage - 60.0).abs() < 0.1);
     }
 
     #[test]
@@ -603,10 +603,10 @@ mod tests {
         assert!(pools.contains_key("H100"));
         assert!(pools.contains_key("H200"));
 
-        // H100 should get 60% of total
-        assert_eq!(pools.get("H100"), Some(&6000));
-        // H200 should get 40% of total
-        assert_eq!(pools.get("H200"), Some(&4000));
+        // H100 should get 40% of total
+        assert_eq!(pools.get("H100"), Some(&4000));
+        // H200 should get 60% of total
+        assert_eq!(pools.get("H200"), Some(&6000));
 
         // Total should equal input
         let total: u64 = pools.values().sum();

@@ -1073,6 +1073,8 @@ impl WeightSetter {
         let cutoff_time = chrono::Utc::now() - chrono::Duration::hours(hours as i64);
 
         // Query verification logs for executors belonging to this miner
+        // Only match executor_ids that belong to this specific miner
+        // New format: "miner{uid}__{original_executor_id}" prevents cross-miner matches
         let query = r#"
             SELECT vl.*, me.miner_id
             FROM verification_logs vl
@@ -1082,9 +1084,11 @@ impl WeightSetter {
         "#;
 
         let miner_id = format!("miner_{}", miner_uid.as_u16());
+        let executor_id_pattern = format!("miner{}__%", miner_uid.as_u16());
         let rows = sqlx::query(query)
             .bind(&miner_id)
             .bind(cutoff_time.to_rfc3339())
+            .bind(&executor_id_pattern)
             .fetch_all(self.persistence.pool())
             .await
             .map_err(|e| anyhow::anyhow!("Failed to query verification logs: {}", e))?;
@@ -1092,9 +1096,19 @@ impl WeightSetter {
         let mut validations = Vec::new();
         for row in rows {
             let executor_id_str: String = row.get("executor_id");
-            let executor_id = executor_id_str
-                .parse::<ExecutorId>()
-                .map_err(|e| anyhow::anyhow!("Failed to parse executor ID: {}", e))?;
+
+            // Extract the original executor ID from format: "miner{uid}__{original_executor_id}"
+            let executor_id = if let Some(separator_pos) = executor_id_str.find("__") {
+                let uuid_part = &executor_id_str[separator_pos + 2..];
+                uuid_part.parse::<ExecutorId>().map_err(|e| {
+                    anyhow::anyhow!("Failed to parse executor ID from '{}': {}", uuid_part, e)
+                })?
+            } else {
+                return Err(anyhow::anyhow!(
+                    "Invalid executor ID format: '{}'. Expected format: 'miner{{uid}}__{{uuid}}'",
+                    executor_id_str
+                ));
+            };
 
             let log = VerificationLog {
                 id: Uuid::parse_str(&row.get::<String, _>("id"))
