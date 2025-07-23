@@ -261,7 +261,7 @@ jobs:
         run: |
           chmod +x scripts/validator/build.sh
           export VALIDATOR_PUBLIC_KEY=$(cat public_key.hex)
-          BITTENSOR_NETWORK=test VALIDATOR_PUBLIC_KEY=$VALIDATOR_PUBLIC_KEY ./scripts/validator/build.sh --no-extract
+          BITTENSOR_NETWORK=finney VALIDATOR_PUBLIC_KEY=$VALIDATOR_PUBLIC_KEY ./scripts/validator/build.sh --no-extract
 
   # Build and test miner
   build-miner:
