@@ -806,8 +806,17 @@ impl VerificationEngine {
                     hotkey, old_miner_id, new_miner_id
                 );
 
-                self.migrate_miner_uid(&old_miner_id, &new_miner_id, miner_info)
-                    .await?;
+                // Migrate the miner UID
+                if let Err(e) = self
+                    .migrate_miner_uid(&old_miner_id, &new_miner_id, miner_info)
+                    .await
+                {
+                    error!(
+                        "Failed to migrate miner UID from {} to {}: {}",
+                        old_miner_id, new_miner_id, e
+                    );
+                    return Err(e);
+                }
             } else {
                 let update_query = r#"
                     UPDATE miners SET
@@ -840,7 +849,7 @@ impl VerificationEngine {
                 .bind(&hotkey)
                 .bind(&miner_info.endpoint)
                 .bind(miner_info.verification_score)
-                .bind(0.0) // uptime_percentage
+                .bind(100.0) // uptime_percentage
                 .bind("{}") // executor_info
                 .execute(self.persistence.pool())
                 .await
@@ -868,64 +877,192 @@ impl VerificationEngine {
         );
 
         // Use a transaction to ensure atomicity
-        let mut tx = self.persistence.pool().begin().await?;
+        let mut tx = self
+            .persistence
+            .pool()
+            .begin()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to begin transaction: {}", e))?;
 
-        // 1. Update the miner record ID
-        let update_miner_query = r#"
-            UPDATE miners SET
-                id = ?, endpoint = ?, verification_score = ?,
-                last_seen = datetime('now'), updated_at = datetime('now')
-            WHERE id = ?
-        "#;
+        // 1. First, get the old miner data
+        debug!("Fetching old miner record: {}", old_miner_id);
+        let get_old_miner = "SELECT * FROM miners WHERE id = ?";
+        let old_miner_row = sqlx::query(get_old_miner)
+            .bind(old_miner_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to fetch old miner record: {}", e))?;
 
-        sqlx::query(update_miner_query)
-            .bind(new_miner_id)
-            .bind(&miner_info.endpoint)
-            .bind(miner_info.verification_score)
+        if old_miner_row.is_none() {
+            return Err(anyhow::anyhow!(
+                "Old miner record not found: {}",
+                old_miner_id
+            ));
+        }
+
+        let old_row = old_miner_row.unwrap();
+        debug!("Found old miner record for migration");
+
+        // 2. Check if any miner with this hotkey exists (including the target)
+        debug!(
+            "Checking for existing miners with hotkey: {}",
+            miner_info.hotkey
+        );
+        let check_hotkey = "SELECT id FROM miners WHERE hotkey = ?";
+        let all_with_hotkey = sqlx::query(check_hotkey)
+            .bind(miner_info.hotkey.to_string())
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to check hotkey existence: {}", e))?;
+
+        // Find if any of them is NOT the old miner
+        let existing_with_hotkey = all_with_hotkey.into_iter().find(|row| {
+            let id: String = row.get("id");
+            id != old_miner_id
+        });
+
+        let should_create_new = if let Some(row) = existing_with_hotkey {
+            let existing_id: String = row.get("id");
+            debug!(
+                "Found existing miner with hotkey {}: id={}",
+                miner_info.hotkey, existing_id
+            );
+            if existing_id == new_miner_id {
+                // The new miner record already exists, just need to delete old
+                debug!("New miner record already exists with correct ID");
+                false
+            } else {
+                // Another miner exists with this hotkey but different ID
+                warn!(
+                    "Cannot migrate: Another miner {} already exists with hotkey {} (trying to create {})",
+                    existing_id, miner_info.hotkey, new_miner_id
+                );
+                return Err(anyhow::anyhow!(
+                    "Cannot migrate: Another miner {} already exists with hotkey {}",
+                    existing_id,
+                    miner_info.hotkey
+                ));
+            }
+        } else {
+            debug!(
+                "No existing miner with hotkey {}, will create new record",
+                miner_info.hotkey
+            );
+            true
+        };
+
+        // Extract old miner data we'll need
+        let verification_score = old_row
+            .try_get::<f64, _>("verification_score")
+            .unwrap_or(0.0);
+        let uptime_percentage = old_row
+            .try_get::<f64, _>("uptime_percentage")
+            .unwrap_or(100.0);
+        let registered_at = old_row
+            .try_get::<String, _>("registered_at")
+            .unwrap_or_else(|_| chrono::Utc::now().to_rfc3339());
+        let executor_info = old_row
+            .try_get::<String, _>("executor_info")
+            .unwrap_or_else(|_| "{}".to_string());
+
+        // 3. Get all related data before deletion
+        debug!("Fetching related executor data");
+        let get_executors = "SELECT * FROM miner_executors WHERE miner_id = ?";
+        let executors = sqlx::query(get_executors)
+            .bind(old_miner_id)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to fetch executors: {}", e))?;
+
+        debug!("Found {} executors to migrate", executors.len());
+
+        // 4. Delete old miner record (this will CASCADE delete miner_executors and verification_requests)
+        debug!("Deleting old miner record: {}", old_miner_id);
+        let delete_old_miner = "DELETE FROM miners WHERE id = ?";
+        sqlx::query(delete_old_miner)
             .bind(old_miner_id)
             .execute(&mut *tx)
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to update miner ID: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to delete old miner record: {}", e))?;
 
-        // 2. Update miner_executors relationships
-        let update_executors_query = r#"
-            UPDATE miner_executors SET
-                miner_id = ?,
-                id = miner_id || '_' || executor_id,
-                updated_at = datetime('now')
-            WHERE miner_id = ?
-        "#;
+        debug!("Deleted old miner record and related data");
 
-        let executor_count = sqlx::query(update_executors_query)
-            .bind(new_miner_id)
-            .bind(old_miner_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to update miner_executors: {}", e))?
-            .rows_affected();
+        // 5. Create new miner record if needed
+        if should_create_new {
+            debug!("Creating new miner record: {}", new_miner_id);
+            let insert_new_miner = r#"
+                INSERT INTO miners (
+                    id, hotkey, endpoint, verification_score, uptime_percentage,
+                    last_seen, registered_at, updated_at, executor_info
+                ) VALUES (?, ?, ?, ?, ?, datetime('now'), ?, datetime('now'), ?)
+            "#;
 
-        // 3. Update verification_requests
-        let update_requests_query = r#"
-            UPDATE verification_requests SET
-                miner_id = ?,
-                updated_at = datetime('now')
-            WHERE miner_id = ?
-        "#;
+            sqlx::query(insert_new_miner)
+                .bind(new_miner_id)
+                .bind(miner_info.hotkey.to_string())
+                .bind(&miner_info.endpoint)
+                .bind(verification_score)
+                .bind(uptime_percentage)
+                .bind(registered_at)
+                .bind(executor_info)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to create new miner record: {}", e))?;
 
-        let request_count = sqlx::query(update_requests_query)
-            .bind(new_miner_id)
-            .bind(old_miner_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to update verification_requests: {}", e))?
-            .rows_affected();
+            debug!("Successfully created new miner record");
+        }
+
+        // 6. Re-create executor relationships
+        let mut executor_count = 0;
+        for executor_row in executors {
+            let executor_id: String = executor_row.get("executor_id");
+            let grpc_address: String = executor_row.get("grpc_address");
+            let gpu_count: i32 = executor_row.get("gpu_count");
+            let gpu_specs: String = executor_row.get("gpu_specs");
+            let cpu_specs: String = executor_row.get("cpu_specs");
+            let location: Option<String> = executor_row.try_get("location").ok();
+            let status: String = executor_row
+                .try_get("status")
+                .unwrap_or_else(|_| "unknown".to_string());
+
+            let new_id = format!("{new_miner_id}_{executor_id}");
+
+            let insert_executor = r#"
+                INSERT INTO miner_executors (
+                    id, miner_id, executor_id, grpc_address, gpu_count,
+                    gpu_specs, cpu_specs, location, status, last_health_check,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, datetime('now'), datetime('now'))
+            "#;
+
+            sqlx::query(insert_executor)
+                .bind(&new_id)
+                .bind(new_miner_id)
+                .bind(&executor_id)
+                .bind(&grpc_address)
+                .bind(gpu_count)
+                .bind(&gpu_specs)
+                .bind(&cpu_specs)
+                .bind(location)
+                .bind(&status)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to recreate executor relationship: {}", e))?;
+
+            executor_count += 1;
+        }
+
+        debug!("Recreated {} executor relationships", executor_count);
 
         // Commit the transaction
-        tx.commit().await?;
+        debug!("Committing transaction");
+        tx.commit()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to commit transaction: {}", e))?;
 
         info!(
-            "Successfully migrated miner UID: {} -> {}. Updated {} executors, {} requests",
-            old_miner_id, new_miner_id, executor_count, request_count
+            "Successfully migrated miner UID: {} -> {}. Migrated {} executors",
+            old_miner_id, new_miner_id, executor_count
         );
 
         Ok(())
