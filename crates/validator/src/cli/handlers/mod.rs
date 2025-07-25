@@ -1,55 +1,9 @@
-use crate::cli::commands::Command;
 use crate::config::ValidatorConfig;
 use anyhow::Result;
 use common::config::ConfigValidation;
 
 pub mod database;
 pub mod service;
-
-pub struct CommandHandler;
-
-impl CommandHandler {
-    pub fn new() -> Self {
-        Self
-    }
-
-    pub async fn execute_with_context(
-        &self,
-        command: Command,
-        global_config: Option<std::path::PathBuf>,
-        local_test: bool,
-    ) -> Result<()> {
-        match command {
-            Command::Start { config } => service::handle_start(global_config.or(config), local_test).await,
-            Command::Stop => service::handle_stop().await,
-            Command::Status => service::handle_status().await,
-            Command::GenConfig { output } => service::handle_gen_config(output).await,
-
-            // Validation commands removed with HardwareValidator
-            Command::Connect { .. } => {
-                Err(anyhow::anyhow!("Hardware validation commands have been removed. Use the verification engine API instead."))
-            }
-
-            Command::Verify { .. } => {
-                Err(anyhow::anyhow!("Hardware validation commands have been removed. Use the verification engine API instead."))
-            }
-
-            // Legacy verification command (deprecated)
-            #[allow(deprecated)]
-            Command::VerifyLegacy { .. } => {
-                Err(anyhow::anyhow!("Legacy validation commands have been removed. Use the verification engine API instead."))
-            }
-
-            Command::Database { action } => database::handle_database(action).await,
-        }
-    }
-}
-
-impl Default for CommandHandler {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 pub struct HandlerUtils;
 
