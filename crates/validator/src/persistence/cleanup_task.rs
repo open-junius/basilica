@@ -167,7 +167,11 @@ mod tests {
             .bind(old_profile.total_score)
             .bind(old_profile.verification_count as i64)
             .bind(old_profile.last_updated.to_rfc3339())
-            .bind(old_profile.last_successful_validation.map(|dt| dt.to_rfc3339()))
+            .bind(
+                old_profile
+                    .last_successful_validation
+                    .map(|dt| dt.to_rfc3339()),
+            )
             .execute(repo.pool())
             .await
             .unwrap();
