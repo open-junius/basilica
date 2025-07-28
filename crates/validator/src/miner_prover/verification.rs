@@ -569,85 +569,193 @@ impl VerificationEngine {
         Ok(())
     }
 
-    /// Ensure miner exists in miners table with real data
+    /// Ensure miner exists in miners table
+    ///
+    /// This function handles three scenarios:
+    /// 1. if UID already exists with same hotkey -> Update data
+    /// 2. if UID already exists with different hotkey -> Update to new hotkey (recycled UID)
+    /// 3. if UID doesn't exist but hotkey does -> on re-registration, migrate the UID
+    /// 4. if neither UID nor hotkey exist -> Create new miner
     async fn ensure_miner_exists_with_info(
         &self,
         miner_info: &super::types::MinerInfo,
     ) -> Result<()> {
-        let new_miner_id = format!("miner_{}", miner_info.uid.as_u16());
+        let new_miner_uid = format!("miner_{}", miner_info.uid.as_u16());
         let hotkey = miner_info.hotkey.to_string();
 
-        // Check if miner already exists
-        let check_hotkey_query = "SELECT id FROM miners WHERE hotkey = ?";
-        let existing_miner = sqlx::query(check_hotkey_query)
-            .bind(&hotkey)
+        // Step 1: handle recycled UIDs
+        let existing_by_uid = self.check_miner_by_uid(&new_miner_uid).await?;
+
+        if let Some((_, existing_hotkey)) = existing_by_uid {
+            return self
+                .handle_recycled_miner_uid(&new_miner_uid, &hotkey, &existing_hotkey, miner_info)
+                .await;
+        }
+
+        // Step 2: handle UID changes when a hotkey moves to a new UID (re-registration)
+        let existing_by_hotkey = self.check_miner_by_hotkey(&hotkey).await?;
+
+        if let Some(old_miner_uid) = existing_by_hotkey {
+            return self
+                .handle_uid_change(&old_miner_uid, &new_miner_uid, &hotkey, miner_info)
+                .await;
+        }
+
+        // Step 3: handle new miners when neither UID nor hotkey exist - create new miner
+        self.create_new_miner(&new_miner_uid, &hotkey, miner_info)
+            .await
+    }
+
+    /// Check if a miner with the given UID exists
+    async fn check_miner_by_uid(&self, miner_uid: &str) -> Result<Option<(String, String)>> {
+        let query = "SELECT id, hotkey FROM miners WHERE id = ?";
+        let result = sqlx::query(query)
+            .bind(miner_uid)
+            .fetch_optional(self.persistence.pool())
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to check miner by uid: {}", e))?;
+
+        Ok(result.map(|row| {
+            let id: String = row.get("id");
+            let hotkey: String = row.get("hotkey");
+            (id, hotkey)
+        }))
+    }
+
+    /// Check if a miner with the given hotkey exists
+    async fn check_miner_by_hotkey(&self, hotkey: &str) -> Result<Option<String>> {
+        let query = "SELECT id FROM miners WHERE hotkey = ?";
+        let result = sqlx::query(query)
+            .bind(hotkey)
             .fetch_optional(self.persistence.pool())
             .await
             .map_err(|e| anyhow::anyhow!("Failed to check miner by hotkey: {}", e))?;
 
-        if let Some(row) = existing_miner {
-            let old_miner_id: String = row.get("id");
+        Ok(result.map(|row| row.get("id")))
+    }
 
-            if old_miner_id != new_miner_id {
-                info!(
-                    "Detected UID change for hotkey {}: {} -> {}",
-                    hotkey, old_miner_id, new_miner_id
-                );
+    /// Handle case where miner UID already exists
+    async fn handle_recycled_miner_uid(
+        &self,
+        miner_uid: &str,
+        new_hotkey: &str,
+        existing_hotkey: &str,
+        miner_info: &super::types::MinerInfo,
+    ) -> Result<()> {
+        if existing_hotkey != new_hotkey {
+            // Case: Recycled UID - same UID but different hotkey
+            info!(
+                "Miner {} exists with old hotkey {}, updating to new hotkey {}",
+                miner_uid, existing_hotkey, new_hotkey
+            );
 
-                // Migrate the miner UID
-                if let Err(e) = self
-                    .migrate_miner_uid(&old_miner_id, &new_miner_id, miner_info)
-                    .await
-                {
-                    error!(
-                        "Failed to migrate miner UID from {} to {}: {}",
-                        old_miner_id, new_miner_id, e
-                    );
-                    return Err(e);
-                }
-            } else {
-                let update_query = r#"
-                    UPDATE miners SET
-                        endpoint = ?, verification_score = ?,
-                        last_seen = datetime('now'), updated_at = datetime('now')
-                    WHERE id = ?
-                "#;
-
-                sqlx::query(update_query)
-                    .bind(&miner_info.endpoint)
-                    .bind(miner_info.verification_score)
-                    .bind(&new_miner_id)
-                    .execute(self.persistence.pool())
-                    .await
-                    .map_err(|e| anyhow::anyhow!("Failed to update miner: {}", e))?;
-
-                debug!("Updated miner record: {} with latest data", new_miner_id);
-            }
-        } else {
-            // No existing miner with this hotkey, create new record
-            let insert_query = r#"
-                INSERT INTO miners (
-                    id, hotkey, endpoint, verification_score, uptime_percentage,
-                    last_seen, registered_at, updated_at, executor_info
-                ) VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now'), datetime('now'), ?)
+            let update_query = r#"
+                UPDATE miners SET
+                    hotkey = ?, endpoint = ?, verification_score = ?,
+                    last_seen = datetime('now'), updated_at = datetime('now')
+                WHERE id = ?
             "#;
 
-            sqlx::query(insert_query)
-                .bind(&new_miner_id)
-                .bind(&hotkey)
+            sqlx::query(update_query)
+                .bind(new_hotkey)
                 .bind(&miner_info.endpoint)
                 .bind(miner_info.verification_score)
-                .bind(100.0) // uptime_percentage
-                .bind("{}") // executor_info
+                .bind(miner_uid)
                 .execute(self.persistence.pool())
                 .await
-                .map_err(|e| anyhow::anyhow!("Failed to insert miner: {}", e))?;
+                .map_err(|e| anyhow::anyhow!("Failed to update miner with new hotkey: {}", e))?;
 
-            info!(
-                "Created miner record: {} with hotkey {} and endpoint {}",
-                new_miner_id, hotkey, miner_info.endpoint
-            );
+            debug!("Updated miner {} with new hotkey and data", miner_uid);
+        } else {
+            // Case: Same miner, same hotkey - just update the data
+            self.update_miner_data(miner_uid, miner_info).await?;
         }
+
+        Ok(())
+    }
+
+    /// Handle case where hotkey exists but with different ID (UID change)
+    async fn handle_uid_change(
+        &self,
+        old_miner_id: &str,
+        new_miner_id: &str,
+        hotkey: &str,
+        miner_info: &super::types::MinerInfo,
+    ) -> Result<()> {
+        info!(
+            "Detected UID change for hotkey {}: {} -> {}",
+            hotkey, old_miner_id, new_miner_id
+        );
+
+        // Migrate the miner UID
+        if let Err(e) = self
+            .migrate_miner_uid(old_miner_id, new_miner_id, miner_info)
+            .await
+        {
+            error!(
+                "Failed to migrate miner UID from {} to {}: {}",
+                old_miner_id, new_miner_id, e
+            );
+            return Err(e);
+        }
+
+        Ok(())
+    }
+
+    /// Update existing miner data
+    async fn update_miner_data(
+        &self,
+        miner_id: &str,
+        miner_info: &super::types::MinerInfo,
+    ) -> Result<()> {
+        let update_query = r#"
+            UPDATE miners SET
+                endpoint = ?, verification_score = ?,
+                last_seen = datetime('now'), updated_at = datetime('now')
+            WHERE id = ?
+        "#;
+
+        sqlx::query(update_query)
+            .bind(&miner_info.endpoint)
+            .bind(miner_info.verification_score)
+            .bind(miner_id)
+            .execute(self.persistence.pool())
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to update miner: {}", e))?;
+
+        debug!("Updated miner record: {} with latest data", miner_id);
+        Ok(())
+    }
+
+    /// Create a new miner record
+    async fn create_new_miner(
+        &self,
+        miner_id: &str,
+        hotkey: &str,
+        miner_info: &super::types::MinerInfo,
+    ) -> Result<()> {
+        let insert_query = r#"
+            INSERT INTO miners (
+                id, hotkey, endpoint, verification_score, uptime_percentage,
+                last_seen, registered_at, updated_at, executor_info
+            ) VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now'), datetime('now'), ?)
+        "#;
+
+        sqlx::query(insert_query)
+            .bind(miner_id)
+            .bind(hotkey)
+            .bind(&miner_info.endpoint)
+            .bind(miner_info.verification_score)
+            .bind(100.0) // uptime_percentage
+            .bind("{}") // executor_info
+            .execute(self.persistence.pool())
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to insert miner: {}", e))?;
+
+        info!(
+            "Created miner record: {} with hotkey {} and endpoint {}",
+            miner_id, hotkey, miner_info.endpoint
+        );
 
         Ok(())
     }
