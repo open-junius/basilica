@@ -466,18 +466,40 @@ impl VerificationEngine {
             return Err(anyhow::anyhow!("Database storage failed: {}", e));
         }
 
-        // Ensure miner-executor relationship exists with real miner data
-        if let Err(e) = self
-            .ensure_miner_executor_relationship_with_info(
-                miner_uid,
-                &unique_executor_id,
-                miner_info,
-            )
+        // Extract GPU infos from executor result if available
+        let gpu_infos = executor_result
+            .executor_result
+            .as_ref()
+            .map(|er| er.gpu_infos.clone())
+            .unwrap_or_default();
+
+        // Ensure miner-executor relationship exists
+        self.ensure_miner_executor_relationship(miner_uid, &unique_executor_id, miner_info)
             .await
-        {
-            warn!("Failed to ensure miner-executor relationship: {}", e);
-            // Don't fail the verification storage for this
-        }
+            .map_err(|e| {
+                error!(
+                    "Failed to ensure miner-executor relationship for miner {}, executor {}: {}",
+                    miner_uid, unique_executor_id, e
+                );
+                anyhow::anyhow!(
+                "Verification storage failed: Unable to establish miner-executor relationship: {}",
+                e
+            )
+            })?;
+
+        // Store GPU UUID assignments
+        self.store_gpu_uuid_assignments(miner_uid, &unique_executor_id, &gpu_infos)
+            .await
+            .map_err(|e| {
+                error!(
+                    "Failed to store GPU UUID assignments for miner {}, executor {}: {}",
+                    miner_uid, unique_executor_id, e
+                );
+                anyhow::anyhow!(
+                    "Verification storage failed: Unable to store GPU UUID assignments: {}",
+                    e
+                )
+            })?;
 
         info!(
             "Executor verification result successfully stored to database for miner {}, executor {}: score={:.2}",
@@ -487,8 +509,8 @@ impl VerificationEngine {
         Ok(())
     }
 
-    /// Ensure miner-executor relationship exists with real miner information
-    async fn ensure_miner_executor_relationship_with_info(
+    /// Ensure miner-executor relationship exists
+    async fn ensure_miner_executor_relationship(
         &self,
         miner_uid: u16,
         executor_id: &str,
@@ -520,6 +542,23 @@ impl VerificationEngine {
         let count: i64 = row.get("count");
 
         if count == 0 {
+            // Before inserting, check if this grpc_address is already in use
+            let grpc_check_query =
+                "SELECT COUNT(*) as count FROM miner_executors WHERE grpc_address = ?";
+            let grpc_row = sqlx::query(grpc_check_query)
+                .bind(&miner_info.endpoint)
+                .fetch_one(self.persistence.pool())
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to check grpc_address uniqueness: {}", e))?;
+
+            let grpc_count: i64 = grpc_row.get("count");
+            if grpc_count > 0 {
+                return Err(anyhow::anyhow!(
+                    "Cannot create executor relationship: grpc_address {} is already registered to another executor",
+                    miner_info.endpoint
+                ));
+            }
+
             // Insert new relationship with required fields
             let insert_query = r#"
                 INSERT OR IGNORE INTO miner_executors (
@@ -564,7 +603,177 @@ impl VerificationEngine {
                 miner_id,
                 executor_id
             );
+
+            // Even if relationship exists, check for duplicates with same grpc_address
+            let duplicate_check_query: &'static str =
+                "SELECT id, executor_id FROM miner_executors WHERE grpc_address = ? AND id != ?";
+            let relationship_id = format!("{miner_id}_{executor_id}");
+
+            let duplicates = sqlx::query(duplicate_check_query)
+                .bind(&miner_info.endpoint)
+                .bind(&relationship_id)
+                .fetch_all(self.persistence.pool())
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to check for duplicate executors: {}", e))?;
+
+            if !duplicates.is_empty() {
+                let duplicate_count = duplicates.len();
+                warn!(
+                    "Found {} duplicate executors with same grpc_address {} for miner {}",
+                    duplicate_count, miner_info.endpoint, miner_id
+                );
+
+                // Delete the duplicates to clean up fraudulent registrations
+                for duplicate in duplicates {
+                    let dup_id: String = duplicate.get("id");
+                    let dup_executor_id: String = duplicate.get("executor_id");
+
+                    warn!(
+                        "Removing duplicate executor {} (id: {}) with same grpc_address as {} for miner {}",
+                        dup_executor_id, dup_id, executor_id, miner_id
+                    );
+
+                    sqlx::query("DELETE FROM miner_executors WHERE id = ?")
+                        .bind(&dup_id)
+                        .execute(self.persistence.pool())
+                        .await
+                        .map_err(|e| {
+                            anyhow::anyhow!("Failed to delete duplicate executor: {}", e)
+                        })?;
+
+                    // Also clean up associated GPU assignments for the duplicate
+                    sqlx::query(
+                        "DELETE FROM gpu_uuid_assignments WHERE executor_id = ? AND miner_id = ?",
+                    )
+                    .bind(&dup_executor_id)
+                    .bind(&miner_id)
+                    .execute(self.persistence.pool())
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!("Failed to clean up GPU assignments for duplicate: {}", e)
+                    })?;
+                }
+
+                info!(
+                    "Cleaned up {} duplicate executors for miner {} with grpc_address {}",
+                    duplicate_count, miner_id, miner_info.endpoint
+                );
+            }
         }
+
+        Ok(())
+    }
+
+    /// Store GPU UUID assignments for an executor
+    async fn store_gpu_uuid_assignments(
+        &self,
+        miner_uid: u16,
+        executor_id: &str,
+        gpu_infos: &[crate::validation::types::GpuInfo],
+    ) -> Result<()> {
+        let miner_id = format!("miner_{miner_uid}");
+        let now = chrono::Utc::now().to_rfc3339();
+
+        for gpu_info in gpu_infos {
+            // Skip invalid UUIDs
+            if gpu_info.gpu_uuid.is_empty() || gpu_info.gpu_uuid == "Unknown UUID" {
+                continue;
+            }
+
+            // Check if this GPU UUID already exists
+            let existing = sqlx::query(
+                "SELECT miner_id, executor_id FROM gpu_uuid_assignments WHERE gpu_uuid = ?",
+            )
+            .bind(&gpu_info.gpu_uuid)
+            .fetch_optional(self.persistence.pool())
+            .await?;
+
+            if let Some(row) = existing {
+                let existing_miner_id: String = row.get("miner_id");
+                let existing_executor_id: String = row.get("executor_id");
+
+                if existing_miner_id != miner_id || existing_executor_id != executor_id {
+                    // GPU reassignment - update to new owner
+                    info!(
+                        "GPU {} reassigned from {}/{} to {}/{}",
+                        gpu_info.gpu_uuid,
+                        existing_miner_id,
+                        existing_executor_id,
+                        miner_id,
+                        executor_id
+                    );
+
+                    sqlx::query(
+                        "UPDATE gpu_uuid_assignments
+                         SET miner_id = ?, executor_id = ?, gpu_index = ?, gpu_name = ?,
+                             last_verified = ?, updated_at = ?
+                         WHERE gpu_uuid = ?",
+                    )
+                    .bind(&miner_id)
+                    .bind(executor_id)
+                    .bind(gpu_info.index as i32)
+                    .bind(&gpu_info.gpu_name)
+                    .bind(&now)
+                    .bind(&now)
+                    .bind(&gpu_info.gpu_uuid)
+                    .execute(self.persistence.pool())
+                    .await?;
+                } else {
+                    // Same owner - just update last_verified
+                    sqlx::query(
+                        "UPDATE gpu_uuid_assignments
+                         SET last_verified = ?, updated_at = ?
+                         WHERE gpu_uuid = ?",
+                    )
+                    .bind(&now)
+                    .bind(&now)
+                    .bind(&gpu_info.gpu_uuid)
+                    .execute(self.persistence.pool())
+                    .await?;
+                }
+            } else {
+                // New GPU UUID - insert
+                sqlx::query(
+                    "INSERT INTO gpu_uuid_assignments
+                     (gpu_uuid, gpu_index, executor_id, miner_id, gpu_name, last_verified, created_at, updated_at)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+                )
+                .bind(&gpu_info.gpu_uuid)
+                .bind(gpu_info.index as i32)
+                .bind(executor_id)
+                .bind(&miner_id)
+                .bind(&gpu_info.gpu_name)
+                .bind(&now)
+                .bind(&now)
+                .bind(&now)
+                .execute(self.persistence.pool())
+                .await?;
+
+                info!(
+                    "Registered new GPU {} (index {}) for {}/{}",
+                    gpu_info.gpu_uuid, gpu_info.index, miner_id, executor_id
+                );
+            }
+        }
+
+        // Update gpu_count in miner_executors based on actual GPU assignments
+        let gpu_count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM gpu_uuid_assignments WHERE miner_id = ? AND executor_id = ?",
+        )
+        .bind(&miner_id)
+        .bind(executor_id)
+        .fetch_one(self.persistence.pool())
+        .await?;
+
+        sqlx::query(
+            "UPDATE miner_executors SET gpu_count = ?, updated_at = datetime('now')
+             WHERE miner_id = ? AND executor_id = ?",
+        )
+        .bind(gpu_count as i32)
+        .bind(&miner_id)
+        .bind(executor_id)
+        .execute(self.persistence.pool())
+        .await?;
 
         Ok(())
     }
@@ -730,7 +939,7 @@ impl VerificationEngine {
     /// Create a new miner record
     async fn create_new_miner(
         &self,
-        miner_id: &str,
+        miner_uid: &str,
         hotkey: &str,
         miner_info: &super::types::MinerInfo,
     ) -> Result<()> {
@@ -742,7 +951,7 @@ impl VerificationEngine {
         "#;
 
         sqlx::query(insert_query)
-            .bind(miner_id)
+            .bind(miner_uid)
             .bind(hotkey)
             .bind(&miner_info.endpoint)
             .bind(miner_info.verification_score)
@@ -754,7 +963,7 @@ impl VerificationEngine {
 
         info!(
             "Created miner record: {} with hotkey {} and endpoint {}",
-            miner_id, hotkey, miner_info.endpoint
+            miner_uid, hotkey, miner_info.endpoint
         );
 
         Ok(())
@@ -763,13 +972,13 @@ impl VerificationEngine {
     /// Migrate miner UID when it changes in the network
     async fn migrate_miner_uid(
         &self,
-        old_miner_id: &str,
-        new_miner_id: &str,
+        old_miner_uid: &str,
+        new_miner_uid: &str,
         miner_info: &super::types::MinerInfo,
     ) -> Result<()> {
         info!(
             "Starting UID migration: {} -> {} for hotkey {}",
-            old_miner_id, new_miner_id, miner_info.hotkey
+            old_miner_uid, new_miner_uid, miner_info.hotkey
         );
 
         // Use a transaction to ensure atomicity
@@ -781,10 +990,10 @@ impl VerificationEngine {
             .map_err(|e| anyhow::anyhow!("Failed to begin transaction: {}", e))?;
 
         // 1. First, get the old miner data
-        debug!("Fetching old miner record: {}", old_miner_id);
+        debug!("Fetching old miner record: {}", old_miner_uid);
         let get_old_miner = "SELECT * FROM miners WHERE id = ?";
         let old_miner_row = sqlx::query(get_old_miner)
-            .bind(old_miner_id)
+            .bind(old_miner_uid)
             .fetch_optional(&mut *tx)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to fetch old miner record: {}", e))?;
@@ -792,7 +1001,7 @@ impl VerificationEngine {
         if old_miner_row.is_none() {
             return Err(anyhow::anyhow!(
                 "Old miner record not found: {}",
-                old_miner_id
+                old_miner_uid
             ));
         }
 
@@ -814,7 +1023,7 @@ impl VerificationEngine {
         // Find if any of them is NOT the old miner
         let existing_with_hotkey = all_with_hotkey.into_iter().find(|row| {
             let id: String = row.get("id");
-            id != old_miner_id
+            id != old_miner_uid
         });
 
         let should_create_new = if let Some(row) = existing_with_hotkey {
@@ -823,7 +1032,7 @@ impl VerificationEngine {
                 "Found existing miner with hotkey {}: id={}",
                 miner_info.hotkey, existing_id
             );
-            if existing_id == new_miner_id {
+            if existing_id == new_miner_uid {
                 // The new miner record already exists, just need to delete old
                 debug!("New miner record already exists with correct ID");
                 false
@@ -831,7 +1040,7 @@ impl VerificationEngine {
                 // Another miner exists with this hotkey but different ID
                 warn!(
                     "Cannot migrate: Another miner {} already exists with hotkey {} (trying to create {})",
-                    existing_id, miner_info.hotkey, new_miner_id
+                    existing_id, miner_info.hotkey, new_miner_uid
                 );
                 return Err(anyhow::anyhow!(
                     "Cannot migrate: Another miner {} already exists with hotkey {}",
@@ -865,7 +1074,7 @@ impl VerificationEngine {
         debug!("Fetching related executor data");
         let get_executors = "SELECT * FROM miner_executors WHERE miner_id = ?";
         let executors = sqlx::query(get_executors)
-            .bind(old_miner_id)
+            .bind(old_miner_uid)
             .fetch_all(&mut *tx)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to fetch executors: {}", e))?;
@@ -873,10 +1082,10 @@ impl VerificationEngine {
         debug!("Found {} executors to migrate", executors.len());
 
         // 4. Delete old miner record (this will CASCADE delete miner_executors and verification_requests)
-        debug!("Deleting old miner record: {}", old_miner_id);
+        debug!("Deleting old miner record: {}", old_miner_uid);
         let delete_old_miner = "DELETE FROM miners WHERE id = ?";
         sqlx::query(delete_old_miner)
-            .bind(old_miner_id)
+            .bind(old_miner_uid)
             .execute(&mut *tx)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to delete old miner record: {}", e))?;
@@ -885,7 +1094,7 @@ impl VerificationEngine {
 
         // 5. Create new miner record if needed
         if should_create_new {
-            debug!("Creating new miner record: {}", new_miner_id);
+            debug!("Creating new miner record: {}", new_miner_uid);
             let insert_new_miner = r#"
                 INSERT INTO miners (
                     id, hotkey, endpoint, verification_score, uptime_percentage,
@@ -894,7 +1103,7 @@ impl VerificationEngine {
             "#;
 
             sqlx::query(insert_new_miner)
-                .bind(new_miner_id)
+                .bind(new_miner_uid)
                 .bind(miner_info.hotkey.to_string())
                 .bind(&miner_info.endpoint)
                 .bind(verification_score)
@@ -920,8 +1129,25 @@ impl VerificationEngine {
             let status: String = executor_row
                 .try_get("status")
                 .unwrap_or_else(|_| "unknown".to_string());
+            // Check if this grpc_address is already in use by another miner
+            let existing_check = sqlx::query(
+                "SELECT COUNT(*) as count FROM miner_executors WHERE grpc_address = ? AND miner_id != ?"
+            )
+            .bind(&grpc_address)
+            .bind(new_miner_uid)
+            .fetch_one(&mut *tx)
+            .await?;
 
-            let new_id = format!("{new_miner_id}_{executor_id}");
+            let existing_count: i64 = existing_check.get("count");
+            if existing_count > 0 {
+                warn!(
+                    "Skipping executor {} during UID migration: grpc_address {} already in use by another miner",
+                    executor_id, grpc_address
+                );
+                continue;
+            }
+
+            let new_id = format!("{new_miner_uid}_{executor_id}");
 
             let insert_executor = r#"
                 INSERT INTO miner_executors (
@@ -933,7 +1159,7 @@ impl VerificationEngine {
 
             sqlx::query(insert_executor)
                 .bind(&new_id)
-                .bind(new_miner_id)
+                .bind(new_miner_uid)
                 .bind(&executor_id)
                 .bind(&grpc_address)
                 .bind(gpu_count)
@@ -950,6 +1176,28 @@ impl VerificationEngine {
 
         debug!("Recreated {} executor relationships", executor_count);
 
+        // 7. Migrate GPU UUID assignments
+        debug!(
+            "Migrating GPU UUID assignments from {} to {}",
+            old_miner_uid, new_miner_uid
+        );
+        let update_gpu_assignments = r#"
+            UPDATE gpu_uuid_assignments
+            SET miner_id = ?
+            WHERE miner_id = ?
+        "#;
+
+        let gpu_result = sqlx::query(update_gpu_assignments)
+            .bind(new_miner_uid)
+            .bind(old_miner_uid)
+            .execute(&mut *tx)
+            .await?;
+
+        debug!(
+            "Migrated {} GPU UUID assignments",
+            gpu_result.rows_affected()
+        );
+
         // Commit the transaction
         debug!("Committing transaction");
         tx.commit()
@@ -958,7 +1206,7 @@ impl VerificationEngine {
 
         info!(
             "Successfully migrated miner UID: {} -> {}. Migrated {} executors",
-            old_miner_id, new_miner_id, executor_count
+            old_miner_uid, new_miner_uid, executor_count
         );
 
         Ok(())
@@ -2133,7 +2381,83 @@ impl VerificationEngine {
             return Ok(None);
         }
 
-        // Use the first GPU for primary information
+        // Extract all GPU information
+        let mut gpu_infos = Vec::new();
+        for (index, gpu_result) in gpu_results.iter().enumerate() {
+            let gpu_name = gpu_result
+                .get("gpu_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Unknown GPU")
+                .to_string();
+
+            let gpu_uuid = gpu_result
+                .get("gpu_uuid")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Unknown UUID")
+                .to_string();
+
+            let computation_time_ns = gpu_result
+                .get("computation_time_ns")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+
+            let memory_bandwidth_gbps = gpu_result
+                .get("memory_bandwidth_gbps")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
+
+            let anti_debug_passed = gpu_result
+                .get("anti_debug_passed")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
+            // SM utilization
+            let sm_utilization = if let Some(sm_util) = gpu_result.get("sm_utilization") {
+                let min_util = sm_util.get("min").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let max_util = sm_util.get("max").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let avg_util = sm_util.get("avg").and_then(|v| v.as_f64()).unwrap_or(0.0);
+
+                crate::validation::types::SmUtilizationStats {
+                    min_utilization: min_util,
+                    max_utilization: max_util,
+                    avg_utilization: avg_util,
+                    per_sm_stats: vec![],
+                }
+            } else {
+                crate::validation::types::SmUtilizationStats {
+                    min_utilization: 0.0,
+                    max_utilization: 0.0,
+                    avg_utilization: 0.0,
+                    per_sm_stats: vec![],
+                }
+            };
+
+            let active_sms = gpu_result
+                .get("sm_utilization")
+                .and_then(|v| v.get("active_sms"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as u32;
+
+            let total_sms = gpu_result
+                .get("sm_utilization")
+                .and_then(|v| v.get("total_sms"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as u32;
+
+            gpu_infos.push(crate::validation::types::GpuInfo {
+                index: index as u32,
+                gpu_name,
+                gpu_uuid,
+                computation_time_ns,
+                memory_bandwidth_gbps,
+                sm_utilization,
+                active_sms,
+                total_sms,
+                anti_debug_passed,
+            });
+        }
+
+        // Use the first GPU for primary information (backwards compatibility)
         let primary_gpu = &gpu_results[0];
 
         let gpu_name = primary_gpu
@@ -2163,38 +2487,9 @@ impl VerificationEngine {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        // SM utilization
-        let sm_utilization = if let Some(sm_util) = primary_gpu.get("sm_utilization") {
-            let min_util = sm_util.get("min").and_then(|v| v.as_f64()).unwrap_or(0.0);
-            let max_util = sm_util.get("max").and_then(|v| v.as_f64()).unwrap_or(0.0);
-            let avg_util = sm_util.get("avg").and_then(|v| v.as_f64()).unwrap_or(0.0);
-
-            crate::validation::types::SmUtilizationStats {
-                min_utilization: min_util,
-                max_utilization: max_util,
-                avg_utilization: avg_util,
-                per_sm_stats: vec![], // Not available in this format
-            }
-        } else {
-            crate::validation::types::SmUtilizationStats {
-                min_utilization: 0.0,
-                max_utilization: 0.0,
-                avg_utilization: 0.0,
-                per_sm_stats: vec![],
-            }
-        };
-
-        let active_sms = primary_gpu
-            .get("sm_utilization")
-            .and_then(|v| v.get("active_sms"))
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as u32;
-
-        let total_sms = primary_gpu
-            .get("sm_utilization")
-            .and_then(|v| v.get("total_sms"))
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as u32;
+        let sm_utilization = gpu_infos[0].sm_utilization.clone();
+        let active_sms = gpu_infos[0].active_sms;
+        let total_sms = gpu_infos[0].total_sms;
 
         let timing_fingerprint = raw_json
             .get("timing_fingerprint")
@@ -2205,6 +2500,7 @@ impl VerificationEngine {
         let executor_result = crate::validation::types::ExecutorResult {
             gpu_name,
             gpu_uuid,
+            gpu_infos,
             cpu_info: crate::validation::types::BinaryCpuInfo {
                 model: "Unknown".to_string(),
                 cores: 0,
