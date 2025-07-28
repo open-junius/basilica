@@ -3,6 +3,7 @@
 //! Bittensor neuron for verifying and scoring miners/executors.
 
 use anyhow::Result;
+use clap::Parser;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod api;
@@ -17,7 +18,7 @@ mod persistence;
 mod ssh;
 mod validation;
 
-use cli::{Args, Cli};
+use cli::Args;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -33,8 +34,7 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let args = Args::parse_args();
-    let cli = Cli::new();
+    let args = Args::parse();
 
-    cli.run(args).await
+    args.run().await
 }
