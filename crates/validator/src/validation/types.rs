@@ -56,23 +56,6 @@ pub struct CpuInfo {
     pub architecture: String,
 }
 
-/// GPU information
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GpuInfo {
-    /// GPU vendor (NVIDIA, AMD, Intel)
-    pub vendor: String,
-    /// GPU model
-    pub model: String,
-    /// VRAM in MB
-    pub vram_mb: u64,
-    /// GPU driver version
-    pub driver_version: String,
-    /// CUDA compute capability (if applicable)
-    pub compute_capability: Option<String>,
-    /// GPU utilization percentage
-    pub utilization_percent: Option<f32>,
-}
-
 /// Memory information
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryInfo {
@@ -427,11 +410,26 @@ pub struct SignatureVerificationResult {
 // Binary Validation Types
 // ============================================================================
 
+/// GPU information from verification
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GpuInfo {
+    pub index: u32,
+    pub gpu_name: String,
+    pub gpu_uuid: String,
+    pub computation_time_ns: u64,
+    pub memory_bandwidth_gbps: f64,
+    pub sm_utilization: SmUtilizationStats,
+    pub active_sms: u32,
+    pub total_sms: u32,
+    pub anti_debug_passed: bool,
+}
+
 /// GPU executor result from binary validation
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutorResult {
     pub gpu_name: String,
     pub gpu_uuid: String,
+    pub gpu_infos: Vec<GpuInfo>,
     pub cpu_info: BinaryCpuInfo,
     pub memory_info: BinaryMemoryInfo,
     pub network_info: BinaryNetworkInfo,
