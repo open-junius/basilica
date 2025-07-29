@@ -6,6 +6,7 @@
 use super::miner_client::{MinerClient, MinerClientConfig};
 use super::types::{ExecutorInfo, ExecutorStatus, MinerInfo};
 use crate::config::VerificationConfig;
+use crate::metrics::ValidatorMetrics;
 use crate::persistence::{entities::VerificationLog, SimplePersistence};
 use crate::ssh::{ExecutorSshDetails, ValidatorSshClient, ValidatorSshKeyManager};
 use anyhow::{Context, Result};
@@ -44,6 +45,8 @@ pub struct VerificationEngine {
     ssh_key_manager: Option<Arc<ValidatorSshKeyManager>>,
     /// Active SSH sessions per executor to prevent concurrent sessions
     active_ssh_sessions: Arc<Mutex<HashSet<String>>>,
+    /// Metrics system for recording verification events
+    metrics: Option<Arc<ValidatorMetrics>>,
 }
 
 impl VerificationEngine {
@@ -1709,6 +1712,7 @@ impl VerificationEngine {
         use_dynamic_discovery: bool,
         ssh_key_manager: Option<Arc<ValidatorSshKeyManager>>,
         bittensor_service: Option<Arc<bittensor::Service>>,
+        metrics: Option<Arc<ValidatorMetrics>>,
     ) -> Result<Self> {
         // Validate required components for dynamic discovery
         if use_dynamic_discovery && ssh_key_manager.is_none() {
@@ -1729,6 +1733,7 @@ impl VerificationEngine {
             bittensor_service,
             ssh_key_manager,
             active_ssh_sessions: Arc::new(Mutex::new(HashSet::new())),
+            metrics,
         })
     }
 
@@ -2965,6 +2970,19 @@ impl VerificationEngine {
                         gpu_count = gpu_count,
                         "[EVAL_FLOW] Binary validation completed"
                     );
+
+                    if let Some(ref metrics) = self.metrics {
+                        metrics
+                            .business()
+                            .record_attestation_verification(
+                                &executor_info.id,
+                                "hardware_attestation",
+                                binary_validation_successful,
+                                true, // signature_valid - binary executed successfully
+                                binary_validation_successful,
+                            )
+                            .await;
+                    }
                 }
                 Err(e) => {
                     error!(
@@ -2974,6 +2992,19 @@ impl VerificationEngine {
                     );
                     binary_validation_successful = false;
                     binary_score = 0.0;
+
+                    if let Some(ref metrics) = self.metrics {
+                        metrics
+                            .business()
+                            .record_attestation_verification(
+                                &executor_info.id,
+                                "hardware_attestation",
+                                false,
+                                false,
+                                false,
+                            )
+                            .await;
+                    }
                 }
             }
         } else if !self.config.binary_validation.enabled {

@@ -706,6 +706,11 @@ impl SimplePersistence {
         })
     }
 
+    /// Get all registered miners
+    pub async fn get_all_registered_miners(&self) -> Result<Vec<MinerData>, anyhow::Error> {
+        self.get_registered_miners(0, 10000).await
+    }
+
     /// Get registered miners with pagination
     pub async fn get_registered_miners(
         &self,
@@ -890,7 +895,7 @@ impl SimplePersistence {
             // First, validate that new grpc_addresses aren't already registered by other miners
             for executor in executors {
                 let existing = sqlx::query(
-                    "SELECT COUNT(*) as count FROM miner_executors 
+                    "SELECT COUNT(*) as count FROM miner_executors
                      WHERE grpc_address = ? AND miner_id != ?",
                 )
                 .bind(&executor.grpc_address)
@@ -1078,6 +1083,65 @@ impl SimplePersistence {
         }
 
         Ok(executors)
+    }
+
+    /// Get the actual gpu_count for an executor from gpu_uuid_assignments
+    pub async fn get_executor_gpu_count_from_assignments(
+        &self,
+        miner_id: &str,
+        executor_id: &str,
+    ) -> Result<u32, anyhow::Error> {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(DISTINCT gpu_uuid) FROM gpu_uuid_assignments
+             WHERE miner_id = ? AND executor_id = ?",
+        )
+        .bind(miner_id)
+        .bind(executor_id)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(count as u32)
+    }
+
+    /// Get the actual gpu_count for all executors of a miner from gpu_uuid_assignments
+    pub async fn get_miner_gpu_counts_from_assignments(
+        &self,
+        miner_id: &str,
+    ) -> Result<Vec<(String, u32)>, anyhow::Error> {
+        let rows = sqlx::query(
+            "SELECT executor_id, COUNT(DISTINCT gpu_uuid) as gpu_count
+             FROM gpu_uuid_assignments
+             WHERE miner_id = ?
+             GROUP BY executor_id",
+        )
+        .bind(miner_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut results = Vec::new();
+        for row in rows {
+            let executor_id: String = row.get("executor_id");
+            let gpu_count: i64 = row.get("gpu_count");
+            results.push((executor_id, gpu_count as u32));
+        }
+
+        Ok(results)
+    }
+
+    /// Get total GPU count for a miner from gpu_uuid_assignments
+    pub async fn get_miner_total_gpu_count_from_assignments(
+        &self,
+        miner_id: &str,
+    ) -> Result<u32, anyhow::Error> {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(DISTINCT gpu_uuid) FROM gpu_uuid_assignments
+             WHERE miner_id = ?",
+        )
+        .bind(miner_id)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(count as u32)
     }
 }
 

@@ -974,8 +974,9 @@ impl WeightSetter {
     }
 
     /// Extract validation result from verification log
-    fn extract_validation_result(
+    async fn extract_validation_result(
         &self,
+        miner_id: &str,
         executor_id: ExecutorId,
         log: &VerificationLog,
     ) -> Result<ExecutorValidationResult> {
@@ -996,9 +997,20 @@ impl WeightSetter {
                     .unwrap_or("UNKNOWN")
                     .to_string();
 
-                // Extract actual GPU count from the original validator-binary data
-                // The validator-binary output includes a top-level gpu_count field
-                let gpu_count = specs["gpu_count"].as_u64().unwrap_or(0) as usize;
+                let gpu_count = match self
+                    .persistence
+                    .get_executor_gpu_count_from_assignments(miner_id, &executor_id.to_string())
+                    .await
+                {
+                    Ok(count) => count as usize,
+                    Err(e) => {
+                        warn!(
+                            "Failed to get GPU count from assignments for executor {}: {}, using 0",
+                            executor_id, e
+                        );
+                        0
+                    }
+                };
 
                 // GPU memory is not available in the stored data, default to 0
                 let gpu_memory = 0u64;
@@ -1159,7 +1171,10 @@ impl WeightSetter {
                     .with_timezone(&Utc),
             };
 
-            match self.extract_validation_result(executor_id.clone(), &log) {
+            match self
+                .extract_validation_result(&miner_id, executor_id.clone(), &log)
+                .await
+            {
                 Ok(validation) => {
                     debug!(
                         "Successfully extracted validation for executor {}: gpu_model={}, gpu_count={}, success={}",
