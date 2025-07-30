@@ -26,20 +26,26 @@ docker-compose -f compose.dev.yml up
 The miner supports three deployment modes:
 
 ### Binary Mode (Default)
+
 Deploys the miner binary and runs it with nohup:
+
 ```bash
 ./deploy.sh -s root@miner.example.com:46088
 ./deploy.sh -s root@miner.example.com:46088 -d binary
 ```
 
 ### Systemd Mode
+
 Deploys the miner binary and manages it as a systemd service:
+
 ```bash
 ./deploy.sh -s root@miner.example.com:46088 -d systemd
 ```
 
 ### Docker Mode
+
 Deploys using docker-compose with public registry images:
+
 ```bash
 ./deploy.sh -s root@miner.example.com:46088 -d docker
 ```
@@ -58,11 +64,13 @@ Deploys using docker-compose with public registry images:
 The miner uses configuration files from the `config/` directory. Default is `config/miner.correct.toml`.
 
 Specify custom config:
+
 ```bash
 ./deploy.sh -s root@miner.example.com:46088 -c config/miner.prod.toml
 ```
 
 Key settings:
+
 - `[bittensor]` - Wallet name, hotkey, network (finney/test/local), netuid 387
 - `[server]` - Port 8080 for internal server, advertised_port 8080
 - `[executor_management]` - Configure executor fleet connections
@@ -106,6 +114,7 @@ OPTIONS:
 ## Service Management
 
 ### Binary Mode
+
 ```bash
 # Check status
 ssh root@miner.example.com -p 46088 "pgrep -f miner"
@@ -118,6 +127,7 @@ ssh root@miner.example.com -p 46088 "pkill -f miner"
 ```
 
 ### Systemd Mode
+
 ```bash
 # Check status
 ssh root@miner.example.com -p 46088 "systemctl status basilica-miner"
@@ -130,6 +140,7 @@ ssh root@miner.example.com -p 46088 "systemctl restart basilica-miner"
 ```
 
 ### Docker Mode
+
 ```bash
 # Check status
 ssh root@miner.example.com -p 46088 "cd /opt/basilica && docker-compose ps"
@@ -144,6 +155,7 @@ ssh root@miner.example.com -p 46088 "cd /opt/basilica && docker-compose restart"
 ## SSH Key Management
 
 The miner automatically generates SSH keys for executor communication:
+
 - SSH key location: `/root/.ssh/miner_executor_key`
 - Public key: `/root/.ssh/miner_executor_key.pub`
 
