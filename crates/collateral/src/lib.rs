@@ -18,7 +18,12 @@ sol!(
 
 // Deployed Collateral contract address
 const COLLATERAL_ADDRESS: Address = address!("C02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2");
-const CHAIN_ID: u64 = 42;
+// prod: 964, test: 945, local 42
+const CHAIN_ID: u64 = 964;
+
+// test https://test.finney.opentensor.ai:443
+// dev https://dev.chain.opentensor.ai:443
+// prod https://lite.chain.opentensor.ai:443
 const RPC_URL: &str = "http://localhost:9944";
 
 #[derive(Debug, Clone)]
@@ -38,6 +43,23 @@ impl From<(FixedBytes<16>, Address, U256, u64)> for Reclaim {
             deny_timeout: tuple.3,
         }
     }
+}
+
+// get the collateral contract instance
+pub async fn get_collateral(
+    private_key: &str,
+) -> Result<Collateral::CollateralInstance<impl alloy_provider::Provider>, anyhow::Error> {
+    let mut signer: PrivateKeySigner = private_key.parse()?;
+    signer.set_chain_id(Some(CHAIN_ID));
+
+    let provider = ProviderBuilder::new()
+        .wallet(signer)
+        .connect(RPC_URL)
+        .await?;
+
+    let contract = Collateral::new(COLLATERAL_ADDRESS, provider);
+
+    Ok(contract)
 }
 
 // transactions
@@ -282,18 +304,20 @@ mod test {
         // get sudo alice signer
         let alithe_private_key = "5fb92d6e98884f76de468fa3f6278f8807c48bebc13595d45af5bdc4da702133";
         let mut signer: PrivateKeySigner = alithe_private_key.parse().unwrap();
+
         signer.set_chain_id(Some(CHAIN_ID));
 
         let provider = ProviderBuilder::new()
             .wallet(signer.clone())
-            .connect("http://localhost:9944")
+            // .connect("http://localhost:9944")
+            .connect("https://test.finney.opentensor.ai")
             .await
             .unwrap();
 
-        let netuid = 1;
+        let netuid = 39;
         let trustee = signer.address();
         let min_collateral_increase = 1;
-        let decision_timeout = 1_u64;
+        let decision_timeout = 20_u64;
 
         let contract = Collateral::deploy(
             &provider,
