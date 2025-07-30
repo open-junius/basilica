@@ -3,6 +3,7 @@
 //! Handles configuration validation, reloading, display, and management
 //! operations for the miner configuration system.
 
+use alloy::signers::local::PrivateKeySigner;
 use anyhow::{anyhow, Result};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -314,6 +315,14 @@ async fn perform_comprehensive_validation(config: &MinerConfig) -> Result<Valida
         validate_remote_deployment_config(deployment, &mut errors, &mut warnings);
     }
 
+    // Contract configuration validation
+    validate_contract_config(
+        &config.miner_contract,
+        &mut errors,
+        &mut warnings,
+        &mut suggestions,
+    );
+
     Ok(ValidationResult {
         is_valid: errors.is_empty(),
         errors,
@@ -457,6 +466,30 @@ fn validate_remote_deployment_config(
     }
 }
 
+/// Validate security configuration
+fn validate_contract_config(
+    config: &crate::config::MinerContractConfig,
+    errors: &mut Vec<String>,
+    _warnings: &mut Vec<String>,
+    _suggestions: &mut Vec<String>,
+) {
+    if config.private_key.is_empty() {
+        errors.push("private_key cannot be empty".to_string());
+        return;
+    }
+
+    let private_key = config.private_key.trim_start_matches("0x");
+    if private_key.len() != 64 {
+        errors.push("private_key must be ex 64 characters long".to_string());
+        return;
+    }
+
+    // Validate that the private key can be parsed and get the corresponding address
+    if config.private_key.parse::<PrivateKeySigner>().is_err() {
+        errors.push("Invalid private key format".to_string());
+    }
+}
+
 /// Display validation results
 fn display_validation_results(result: &ValidationResult) {
     if result.is_valid {
@@ -515,6 +548,10 @@ fn mask_sensitive_fields(config: &mut MinerConfig) {
             .next()
             .unwrap_or("****MASKED****")
             .to_string();
+    }
+
+    if !config.miner_contract.private_key.is_empty() {
+        config.miner_contract.private_key = "****MASKED****".to_string();
     }
 }
 

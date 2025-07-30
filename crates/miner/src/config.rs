@@ -88,6 +88,9 @@ pub struct MinerConfig {
     /// Validator assignment configuration
     #[serde(default)]
     pub validator_assignment: ValidatorAssignmentConfig,
+
+    /// Miner contract configuration
+    pub miner_contract: MinerContractConfig,
 }
 
 /// Miner-specific Bittensor configuration
@@ -378,6 +381,22 @@ pub struct MinerAdvertisedAddresses {
     pub metrics_endpoint: Option<String>,
 }
 
+/// Miner-specific Contract configuration, the private key is from env variable
+/// export BASILCA_MINER_CONTRACT__PRIVATE_KEY="0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MinerContractConfig {
+    pub private_key: String,
+}
+
+impl Default for MinerContractConfig {
+    fn default() -> Self {
+        Self {
+            private_key: "0x0000000000000000000000000000000000000000000000000000000000000000"
+                .to_string(),
+        }
+    }
+}
+
 impl Default for MinerConfig {
     fn default() -> Self {
         Self {
@@ -400,6 +419,7 @@ impl Default for MinerConfig {
             ssh_session: ExecutorSshConfig::default(),
             advertised_addresses: MinerAdvertisedAddresses::default(),
             validator_assignment: ValidatorAssignmentConfig::default(),
+            miner_contract: MinerContractConfig::default(),
         }
     }
 }
